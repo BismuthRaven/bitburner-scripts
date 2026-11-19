@@ -1,5 +1,29 @@
+# Ignore hidden dirs and their contents (dirname starts with period)
+.*/** 
 
+# DONT ignore specific hidden dirs
+!.github/**
+
+# Ignore all hidden files (filename starts with period) at any depth
+.*
+
+# DONT ignore specific hidden files
+!.gitignore
+
+# Ignore specific file types
+*.[Mm][Dd] # Markdown common in agent-driven development
 *.txt
-.vscode/*.*
 *.ts
 *.code-workspace
+
+# DONT Ignore specific files from above rule
+!README.[Mm][Dd]
+!*.js.config.txt
+
+
+# Ignore generic JS/TS framework things
+node_modules/
+package-lock.json
+npm-debug.log
+yarn.lock
+tsconfig.json
