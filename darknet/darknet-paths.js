@@ -36,6 +36,8 @@ export const buildOf = (process) => {
 
 /** Cache rewards (one JSON line each) written by the cache worker for the local crawler to report. */
 export const LOOT_FILE = inDir("darknet-loot.txt");
+/** Where the first STORM_SEED.exe was found. .exe files can't be scp'd, so this record on home is the loot. Delete it to re-arm. */
+export const STORM_SEED_FILE = inDir("darknet-storm-seed.txt");
 /** Passwords for a new worm, written and copied by whoever starts it. Outside CHILD_FILES to keep the build stable. */
 export const KNOWN_FILE = "/Temp/darknet-known.json";
 /** PIDs asked to stop, per server. Workers poll it and exit, which saves the crawler ns.kill (0.5 GB). */

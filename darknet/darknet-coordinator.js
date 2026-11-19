@@ -4,10 +4,12 @@
  * Settings: argsSchema, darknet/darknet-coordinator.js.config.txt or command line; shared ones arrive as args from darknet-daemon.js.
  */
 import { getConfiguration, getFnRunViaNsExec, getNsDataThroughFile_Custom, log as logToTail, formatRam } from "../helpers.js";
+import { isTerminalInUse } from "../helpers-gui.js";
 import { BACKDOOR_WORKER, KNOWN_FILE, WORM, RELAUNCH_WORKER, STASIS_WORKER, samePath } from "./darknet-paths.js";
 
 const CRAWLER = WORM;
 const CONTRACTOR = "/Tasks/contractor.js";
+const CONTRACTOR_PEAK_RAM = 14.2; // contractor.js briefly needs a 6.6 GB temp script, then the 11.6 GB solver (daemon.js uses the same minRamReq)
 const DARKSCAPE = "DarkscapeNavigator.exe";
 const TOR_BUYER = "/Tasks/tor-manager.js";
 const PROGRAM_BUYER = "/Tasks/program-manager.js";
@@ -221,6 +223,9 @@ const plan = async (ns, state, hasSingularity) => {
     logChanged(ns, state, "backdoor", "");
   } else if (isRunningOn(ns, "home", BACKDOOR_WORKER)) {
     logChanged(ns, state, "backdoor", `INFO: ${BACKDOOR_WORKER} is still heading to its target...`);
+  } else if (isTerminalInUse()) {
+    // installBackdoor only works on the player's current server, so backdooring always moves the terminal
+    logChanged(ns, state, "backdoor", "INFO: Backdoors wait while the terminal is in use (focused or has text): they move the terminal between servers.");
   } else if (!(lab && !labBackdoored && options["max-backdoors"] > 0 && planLabBackdoor(ns, state, anchors, lab, now))) {
     planBackdoor(ns, state, anchors, backdoored, now);
   }
@@ -328,6 +333,9 @@ export const planMigration = (state, linked, lab, now) => {
 const runContractor = (ns, state, hosts, now) => {
   if (hosts.length === 0 || now - state.lastContractRun < options["contract-ms"] || isRunningOn(ns, "home", CONTRACTOR)) {
     return;
+  }
+  if (ns.getServerMaxRam("home") - ns.getServerUsedRam("home") < CONTRACTOR_PEAK_RAM) {
+    return; // keep the contract list; retried next loop once home has room for the solver
   }
   state.lastContractRun = now;
   const count = hosts.reduce((sum, host) => sum + state.nodes[host].contracts.length, 0);

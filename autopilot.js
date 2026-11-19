@@ -7,28 +7,28 @@ import { COORDINATOR as DARKNET_COORDINATOR, DAEMON as DARKNET_DAEMON, WORM as D
 
 const argsSchema = [ // The set of all command line arguments
     ['next-bn', 0], // If we destroy the current BN, the next BN to start
-    ['disable-auto-destroy-bn', false], // Set to true if you do not want to auto destroy this BN when done
-    ['install-at-aug-count', 8], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
-    ['install-at-aug-plus-nf-count', 12], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['disable-auto-destroy-bn', true], // Set to true if you do not want to auto destroy this BN when done
+    ['install-at-aug-count', 15], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['install-at-aug-plus-nf-count', 20], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
-    ['install-countdown', 5 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
-    ['time-before-boosting-best-hack-server', 15 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
+    ['install-countdown', 10 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
+    ['time-before-boosting-best-hack-server', 10 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
-    ['interval', 2000], // Wake up this often (milliseconds) to check on things
-    ['interval-check-scripts', 10000], // Get a listing of all running processes on home this frequently
-    ['high-hack-threshold', 8000], // Once hack level reaches this, we start daemon in high-performance hacking mode
+    ['interval', 2 * 1000], // Wake up this often (milliseconds) to check on things
+    ['interval-check-scripts', 5 * 1000], // Get a listing of all running processes on home this frequently
+    ['high-hack-threshold', 5000], // Once hack level reaches this, we start daemon in high-performance hacking mode
     ['enable-bladeburner', null], // (Deprecated) Bladeburner is now always enabled if it's available. Use '--disable-bladeburner' to explicitly turn off
     ['disable-bladeburner', false], // This will instruct daemon.js not to run the bladeburner.js, even if bladeburner is available.
-    ['wait-for-4s-threshold', 0.9], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
+    ['wait-for-4s-threshold', 0.8], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
     ['disable-wait-for-4s', false], // If true, will doesn't wait for the 4S Tix API to be acquired under any circumstantes
     ['disable-rush-gangs', false], // Set to true to disable focusing work-for-faction on Karma until gangs are unlocked
     ['disable-casino', false], // Set to true to disable running the casino.js script automatically
-    ['spend-hashes-on-server-hacking-threshold', 0.1], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
+    ['spend-hashes-on-server-hacking-threshold', 0.15], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
-    ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
-    ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
-    ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
+    ['xp-mode-interval-minutes', 20], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
+    ['xp-mode-duration-minutes', 2], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
+    ['no-tail-windows', true], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
 ];
 
 export function autocomplete(data, args) {
@@ -307,7 +307,7 @@ export async function main(ns) {
                     reason = "by prioritizing hack exp gains";
                 }
                 if (reservingMoneyForDaedalus) {
-                    reservingMoneyForDaedalus = false; // Turn this flag off now so we reset our reserve.txt
+                    reservingMoneyForDaedalus = false; // Turn this flag off now so we reset our MachineState/CashReserve.txt
                     reason = (reason ? reason + " and" : "by") + " saving up our money";
                 }
                 log(ns, `SUCCESS: We sped along joining the faction 'Daedalus' ${reason}. ` + // Pat ourselves on the back
@@ -347,7 +347,7 @@ export async function main(ns) {
                     `augmentations installed (scripts cannot check this without SF4).`, true, 'success');
                 return autoJoinDaedalusUnavailable = true; // We won't show this again.
             }
-            reservingMoneyForDaedalus = true; // Flag to pause all spending (set reserve.txt) until we've gotten the Daedalus invite
+            reservingMoneyForDaedalus = true; // Flag to pause all spending (set MachineState/CashReserve.txt) until we've gotten the Daedalus invite
             if (player.money < moneyReq) { // Only liquidate stocks if we don't have enough cash lying around.
                 disableStockmasterForDaedalus = true; // Flag to keep stockmaster offline until we've gotten a daedalus invite
                 log(ns, "INFO: Temporarily liquidating stocks to earn an invite to Daedalus...", true, 'info');
@@ -524,7 +524,7 @@ export async function main(ns) {
         if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32)
             launchScriptHelper(ns, 'stockmaster.js', [
                 "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
-                "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
+                "--reserve", 0, // Override to ignore the global MachineState/CashReserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
@@ -966,7 +966,7 @@ export async function main(ns) {
                 }
                 log(ns, purchaseChangeLog, true);
             }
-            ns.write("reserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
+            ns.write("MachineState/CashReserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
         }
         // We must wait until the configured cooldown elapses before we install augs.
         if (installCountdown > Date.now()) {
@@ -1091,9 +1091,9 @@ export async function main(ns) {
      * @param {Player} player */
     function manageReservedMoney(ns, player, stocksValue) {
         if (reservedPurchase) return; // Do not mess with money reserved for installing augmentations
-        const currentReserve = Number(ns.read("reserve.txt") || 0);
+        const currentReserve = Number(ns.read("MachineState/CashReserve.txt") || 0);
         if (reservingMoneyForDaedalus) // Reserve 100b to get the daedalus invite
-            return currentReserve == 100E9 ? true : ns.write("reserve.txt", 100E9, "w");
+            return currentReserve == 100E9 ? true : ns.write("MachineState/CashReserve.txt", 100E9, "w");
         // Otherwise, reserve money for stocks for a while, as it's our main source of income early in the BN
         // It also acts as a decent way to save up for augmentations
         const minStockValue = 8E9; // At a minimum 8 of the 10 billion earned from the casino must be reserved for buying stock
@@ -1102,7 +1102,7 @@ export async function main(ns) {
         const reserveCap = 1E12; // As we start start to earn crazy money, we will hit the stock market cap, so cap the maximum reserve
         // Dynamically update reserved cash based on how much money is already converted to stocks.
         const reserve = Math.min(reserveCap, Math.max(0, player.money * minStockPercent, minStockValue - stocksValue));
-        return currentReserve == reserve ? true : ns.write("reserve.txt", reserve, "w"); // Reserve for stocks
+        return currentReserve == reserve ? true : ns.write("MachineState/CashReserve.txt", reserve, "w"); // Reserve for stocks
         // NOTE: After several iterations, I decided that the above is actually best to keep in all scenarios:
         // - Casino.js ignores the reserve, so the above takes care of ensuring our casino seed money isn't spent
         // - In low-income situations, stockmaster will be our best source of income. We invoke it such that it ignores
@@ -1110,11 +1110,11 @@ export async function main(ns) {
         // - Once high-hack/gang income is achieved, this 8B will not be missed anyway.
         /*
         if(!ranCasino) {
-            ns.write("reserve.txt", 300000, "w"); // Prevent other scripts from spending our casino seed money
+            ns.write("MachineState/CashReserve.txt", 300000, "w"); // Prevent other scripts from spending our casino seed money
             return moneyReserved = true;
         }
         // Otherwise, clear any reserve we previously had
-        if(moneyReserved) ns.write("reserve.txt", 0, "w"); // Remove the casino reserve we would have placed
+        if(moneyReserved) ns.write("MachineState/CashReserve.txt", 0, "w"); // Remove the casino reserve we would have placed
         return moneyReserved = false;
         */
     }
@@ -1135,7 +1135,7 @@ export async function main(ns) {
                 `\n  purchase some home RAM (which you must do manually at a store like [alpha ent.] in the city),` +
                 `\n\n  Once you have more home ram, feel free to 'run ${ns.getScriptName()}' again!` +
                 `\n\n` + '-'.repeat(100), true);
-            return false; // Daemon.js needs more room to breath
+            return false; // daemon.js needs more room to breath
         }
         // Otherwise, keep running
         return true;

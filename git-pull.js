@@ -1,8 +1,9 @@
 let options;
 const argsSchema = [
-    ['github', 'alainbryden'],
+    ['github', 'BismuthRaven'],
     ['repository', 'bitburner-scripts'],
     ['branch', 'main'],
+    ['remote-folder', ''], // Folder in the repository that maps to the game's root ('' = the repository root)
     ['download', []], // By default, all supported files in the repository will be downloaded. Override with just a subset of files here
     ['new-file', []], // If a repository listing fails, only files returned by ns.ls() will be downloaded. You can add additional files to seek out here.
     ['subfolder', ''], // Can be set to download to a sub-folder that is not part of the remote repository structure
@@ -30,10 +31,13 @@ export async function main(ns) {
     options.subfolder = options.subfolder ? trimSlash(options.subfolder) : // Remove leading slash from any user-specified folder
         ns.getScriptName().substring(0, ns.getScriptName().lastIndexOf('/')); // Default to the current folder
     const baseUrl = `raw.githubusercontent.com/${options.github}/${options.repository}/${options.branch}/`;
-    const filesToDownload = options['new-file'].concat(options.download.length > 0 ? options.download : await repositoryListing(ns));
-    for (const localFilePath of filesToDownload) {
+    const remoteFolder = trimSlash(options['remote-folder']);
+    const filesToDownload = options['new-file'].concat(options.download.length > 0 ? options.download : await repositoryListing(ns, remoteFolder));
+    for (const rawFilePath of filesToDownload) {
+        // Listing results are repository paths; strip the remote folder to get the path in the game
+        const localFilePath = remoteFolder && trimSlash(rawFilePath).startsWith(remoteFolder + '/') ? trimSlash(rawFilePath).slice(remoteFolder.length + 1) : rawFilePath;
         let fullLocalFilePath = pathJoin(options.subfolder, localFilePath);
-        const remoteFilePath = `https://` + pathJoin(baseUrl, localFilePath);
+        const remoteFilePath = `https://` + pathJoin(baseUrl, remoteFolder, localFilePath);
         ns.print(`Trying to update "${fullLocalFilePath}" from ${remoteFilePath} ...`);
         if (await ns.wget(`${remoteFilePath}?ts=${new Date().getTime()}`, fullLocalFilePath) && rewriteFileForSubfolder(ns, fullLocalFilePath))
             ns.tprint(`SUCCESS: Updated "${fullLocalFilePath}" to the latest from ${remoteFilePath}`);

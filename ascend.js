@@ -46,7 +46,7 @@ export async function main(ns) {
     await getNsDataThroughFile(ns, 'ns.singularity.stopAction()');
 
     // Clear any global reserve so that all money can be spent
-    await ns.write("reserve.txt", 0, "w");
+    await ns.write("MachineState/CashReserve.txt", 0, "w");
 
     // STEP 1: Liquidate Stocks and (SF9) Hacknet Hashes
     log(ns, 'Sell stocks and hashes...', true, 'info');

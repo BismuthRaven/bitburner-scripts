@@ -14,6 +14,7 @@ import {
   RAM_WORKER,
   RESTART_WORKER,
   STASIS_WORKER,
+  STORM_SEED_FILE,
   configFile,
   readBuild,
   samePath,
@@ -268,6 +269,16 @@ const mineLocalFiles = (ns, state, host) => {
   }
   if (ns.fileExists(STORM_SEED, host) && !state.warned.has(STORM_SEED)) {
     state.warned.add(STORM_SEED);
+    // First sighting anywhere: the home record doesn't exist yet. Written locally, then scp'd (the .exe itself can't be).
+    if (!ns.fileExists(STORM_SEED_FILE, "home")) {
+      ns.write(STORM_SEED_FILE, `${STORM_SEED} found on ${host} at ${new Date().toISOString()}. Never run by the darknet scripts.\n`, "w");
+      if (ns.scp(STORM_SEED_FILE, "home")) {
+        toast(ns, "success", `DN: LOOT: storm seed: [${host}]`,
+          `DN loot: first ${STORM_SEED}, on ${host}. .exe files can't be copied, so its location is saved to home (cat ${STORM_SEED_FILE}). ` +
+          `Running it deletes ~60% of the darknet and restarts the rest.`, true);
+        return;
+      }
+    }
     toast(
       ns,
       "warning",

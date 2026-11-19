@@ -50,9 +50,9 @@ export async function main(ns) {
         ns.print(`${hackableServers.filter(s => myHackingLevel > dictRequiredHackingLevels[s]).length} servers are within our hack level (${myHackingLevel}).`);
         ns.print(`${hackableServers.filter(s => myHackingLevel > dictRequiredHackingLevels[s] && dictRootAccess[s]).length} rooted servers are within our hack level (${myHackingLevel})`);
 
-        // Get the set of servers that do not yet have a backdoor installed
+        // Get the set of servers that do not yet have a backdoor installed (purchasedByPlayer: our own servers can't be backdoored, whatever they're named)
         let toBackdoor = await getNsDataThroughFile(ns,
-            `ns.args.filter(server => !ns.getServer(server).backdoorInstalled)`,
+            `ns.args.filter(server => { const s = ns.getServer(server); return !s.backdoorInstalled && !s.purchasedByPlayer; })`,
             '/Temp/getServers-where-not-backdoorInstalled.txt', hackableServers);
         let count = toBackdoor.length;
         // Early exit condition if there are no servers left to backdoor

@@ -184,7 +184,7 @@ async function getHudData(ns, bitNode, dictSourceFiles, options) {
     // Show reserved money
     {
         const val = ["Reserve"]
-        const reserve = Number(ns.read("reserve.txt") || 0);
+        const reserve = Number(ns.read("MachineState/CashReserve.txt") || 0);
         if (reserve > 0) {
             val.push(true, formatNumberShort(reserve, 3, 2), "Most scripts will leave this much money unspent. Remove with `run reserve.js 0`");
         } else val.push(false)

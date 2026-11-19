@@ -1,0 +1,14 @@
+{
+  "max-backdoors": 2,
+  "relink-depth": 3,
+  "fresh-ms": 90000,
+  "forget-ms": 900000,
+  "plan-ms": 10000,
+  "backdoor-retry-ms": 300000,
+  "backdoor-min-gain": 8,
+  "max-passwords": 500,
+  "notes-file": "/data/darknet-notes.txt",
+  "contract-ms": 60000,
+  "cross-air-gaps": true,
+  "verbose": false
+}
