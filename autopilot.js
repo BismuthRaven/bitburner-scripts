@@ -3,6 +3,7 @@ import {
     getActiveSourceFiles, tryGetBitNodeMultipliers, getStocksValue, unEscapeArrayArgs,
     formatMoney, formatDuration, formatNumber, getErrorInfo, tail, jsonReplacer
 } from './helpers.js'
+import { isModuleEnabled, AUTOPILOT_STATUS_FILE } from './helpers-gui.js'
 import { COORDINATOR as DARKNET_COORDINATOR, DAEMON as DARKNET_DAEMON, WORM as DARKNET_WORM, buildOf, stampBuild } from './darknet/darknet-paths.js'
 
 const argsSchema = [ // The set of all command line arguments
@@ -246,13 +247,15 @@ export async function main(ns) {
         let stocksValue = 0;
         try { stocksValue = await getStocksValue(ns); } catch { /* Assume if this fails (insufficient ram) we also have no stocks */ }
         manageReservedMoney(ns, player, stocksValue);
-        await checkOnDaedalusStatus(ns, player, stocksValue);
-        await checkIfBnIsComplete(ns, player);
-        await maybeAcceptStaneksGift(ns, player);
+        // Each of these is switchable from autopilot-gui.js (the switches live in CONTROL_FILE and are re-read every loop)
+        if (isModuleEnabled(ns, 'ap-daedalus')) await checkOnDaedalusStatus(ns, player, stocksValue);
+        if (isModuleEnabled(ns, 'ap-destroy-bn')) await checkIfBnIsComplete(ns, player);
+        if (isModuleEnabled(ns, 'stanek')) await maybeAcceptStaneksGift(ns, player);
         await checkOnRunningScripts(ns, player);
-        await maybeDoCasino(ns, player);
-        await maybeRunDarknet(ns);
-        await maybeInstallAugmentations(ns, player);
+        if (isModuleEnabled(ns, 'ap-casino')) await maybeDoCasino(ns, player);
+        if (isModuleEnabled(ns, 'darknet')) await maybeRunDarknet(ns);
+        if (isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player);
+        publishStatus(ns); // Update the snapshot autopilot-gui.js reads (after the status text has been set)
         return shouldWeKeepRunning(ns); // Return false to shut down autopilot.js if we installed augs, or don't have enough home RAM
     }
 
@@ -521,14 +524,14 @@ export async function main(ns) {
         homeRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
 
         // Launch stock-master in a way that emphasizes it as our main source of income early-on
-        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32)
+        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32 && isModuleEnabled(ns, 'stockmaster'))
             launchScriptHelper(ns, 'stockmaster.js', [
                 "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
                 "--reserve", 0, // Override to ignore the global MachineState/CashReserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
-        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
+        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js') && isModuleEnabled(ns, 'sleeve')) {
             let sleeveArgs = [];
             if (!options["disable-casino"] && !ranCasino)
                 sleeveArgs.push("--training-reserve", 300000); // Avoid training away our casino seed money
@@ -540,6 +543,7 @@ export async function main(ns) {
         // Spend hacknet hashes on our boosting best hack-income server once established
         let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
         if ((9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
+            && isModuleEnabled(ns, 'spend-hashes')
             && 0 != bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain) // No point in boosting hack income if it's scaled to 0 in the current BN
         {
             const strServerIncomeInfo = ns.read('/Temp/analyze-hack.txt');	// HACK: Steal this file that Daemon also relies on
@@ -611,7 +615,7 @@ export async function main(ns) {
                 let useXpOnlyMode = prioritizeHackForDaedalus || prioritizeHackForWd ||
                     // In BNs that give no money for hacking, always start daemon.js in this mode (except BN8, because TODO: --xp-only doesn't handle stock manipulation)
                     (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8);
-                if (!useXpOnlyMode) { // Otherwise, respect the configured interval / duration
+                if (!useXpOnlyMode && isModuleEnabled(ns, 'ap-xp-mode')) { // Otherwise, respect the configured interval / duration
                     const xpInterval = Number(options['xp-mode-interval-minutes']);
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
                     const minutesInAug = getTimeInAug() / 60.0 / 1000.0;
@@ -647,7 +651,7 @@ export async function main(ns) {
 
         // Once stanek's gift is accepted, launch it once per reset before we launch daemon (Note: stanek's gift is auto-purchased by faction-manager.js on your first install)
         let stanekRunning = (13 in unlockedSFs) && findScript('stanek.js') !== undefined;
-        if ((13 in unlockedSFs) && !stanekLaunched && !stanekRunning && installedAugmentations.includes(augStanek)) {
+        if ((13 in unlockedSFs) && !stanekLaunched && !stanekRunning && installedAugmentations.includes(augStanek) && isModuleEnabled(ns, 'stanek')) {
             stanekLaunched = true; // Once we've know we've launched stanek once, we never have to again this reset.
             const stanekArgs = ["--on-completion-script", getFilePath('daemon.js')]
             if (options['no-tail-windows']) stanekArgs.push('--no-tail'); // Relay the option to suppress tail windows
@@ -661,9 +665,11 @@ export async function main(ns) {
 
         // Launch (or re-launch) daemon if it is not already running with all our desired args.
         // Hack: Ignore numeric arguments in the comparison, since we e.g. tweak --recovery-thread-padding over time
-        let launchDaemon = !existingDaemon || daemonArgs.some(arg => !existingDaemon.args.includes(arg) && !Number.isFinite(arg)) ||
+        // 'Manage daemon' off means we leave daemon.js entirely to the player (start/stop it by hand).
+        let launchDaemon = isModuleEnabled(ns, 'ap-daemon') && (!existingDaemon || daemonArgs.some(arg => !existingDaemon.args.includes(arg) && !Number.isFinite(arg)) ||
             // Special cases: We also must relaunch daemon if it is running with certain flags we wish to remove
-            (["--xp-only"].some(arg => !daemonArgs.includes(arg) && existingDaemon.args.includes(arg)))
+            (["--xp-only"].some(arg => !daemonArgs.includes(arg) && existingDaemon.args.includes(arg))))
+        wantedDaemonArgs = daemonArgs; // Report the args we would want, even when we aren't managing daemon
         if (launchDaemon) {
             if (existingDaemon) {
                 daemonRelaunchMessage ??= `Relaunching daemon.js with new arguments since the current instance doesn't include all the args we want.`;
@@ -703,13 +709,13 @@ export async function main(ns) {
 
             // Start gangs immediately (even though daemon would eventually start it) since we want any income they provide right away after an ascend
             // TODO: Consider monitoring gangs territory progress and increasing their budget / decreasing their reserve to help kick-start them
-            if (playerInGang && !findScript('gangs.js'))
+            if (playerInGang && !findScript('gangs.js') && isModuleEnabled(ns, 'gangs'))
                 launchScriptHelper(ns, 'gangs.js');
         }
 
         // Launch work-for-factions if it isn't already running (rules for maybe killing unproductive instances are above)
         // Note: We delay launching our own 'work-for-factions.js' until daemon has warmed up, so we don't steal it's "kickstartHackXp" study focus
-        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 30000) {
+        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 30000 && isModuleEnabled(ns, 'work-for-factions')) {
             // If we're trying to rush gangs, run in such a way that we will spend most of our time doing crime, reducing Karma (also okay early income)
             // NOTE: Default work-for-factions behaviour is to spend hashes on coding contracts, which suits us fine
             launchScriptHelper(ns, 'work-for-factions.js', rushGang ? rushGangsArgs : workForFactionsArgs);
@@ -1091,6 +1097,7 @@ export async function main(ns) {
      * @param {Player} player */
     function manageReservedMoney(ns, player, stocksValue) {
         if (reservedPurchase) return; // Do not mess with money reserved for installing augmentations
+        if (!isModuleEnabled(ns, 'ap-reserve')) return; // Switched off in autopilot-gui.js: MachineState/CashReserve.txt belongs to the player
         const currentReserve = Number(ns.read("MachineState/CashReserve.txt") || 0);
         if (reservingMoneyForDaedalus) // Reserve 100b to get the daedalus invite
             return currentReserve == 100E9 ? true : ns.write("MachineState/CashReserve.txt", 100E9, "w");
@@ -1154,10 +1161,24 @@ export async function main(ns) {
         else
             log(ns, `ERROR: Failed to launch ${baseScriptName} with args: [${args.join(", ")}]` +
                 (err ? `\nCaught: ${getErrorInfo(err)}` : ''), true, 'error');
+        recentLaunches = [{ time: Date.now(), script: baseScriptName, args, pid }, ...recentLaunches].slice(0, 15);
         return pid;
     }
 
     let lastStatusLog = ""; // The current or last-assigned long-term status (what this script is waiting to happen)
+    let wantedDaemonArgs = []; // The daemon args we last decided on (shown in autopilot-gui.js)
+    let recentLaunches = []; // Scripts we launched, newest first (shown in autopilot-gui.js)
+
+    /** Snapshot of autopilot's state and launch history for autopilot-gui.js (0 GB file write)
+     * @param {NS} ns */
+    function publishStatus(ns) {
+        ns.write(AUTOPILOT_STATUS_FILE, JSON.stringify({
+            time: Date.now(), pid: ns.pid, status: lastStatusLog,
+            installAt: installCountdown || 0, reservedPurchase, nextBn,
+            wantedDaemonArgs, recentLaunches,
+            flags: Object.fromEntries(Object.entries(options ?? {}).filter(([k]) => k != "_" && options[k] === true)),
+        }), "w");
+    }
 
     /** Helper to set a global status and print it if it changes
      * @param {NS} ns */

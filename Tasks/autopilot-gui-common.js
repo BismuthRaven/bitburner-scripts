@@ -18,7 +18,7 @@ export const CG_WORKERS = {
 export const CG_MODULES = [
     // Autopilot decisions
     { id: "ap-daemon", group: "Autopilot decisions", label: "Manage daemon", by: ["AP"], scripts: ["daemon.js"], desc: "Start daemon.js and relaunch it whenever its wanted mode changes (early / tight / xp-only). Off = you start/stop daemon yourself." },
-    { id: "ap-xp-mode", group: "Autopilot decisions", label: "XP-mode switching", by: ["AP"], desc: "Relaunch daemon in --xp-only every 55 min for 5 min, near the Daedalus/WD hack level, or in BNs with no hack money." },
+    { id: "ap-xp-mode", group: "Autopilot decisions", label: "XP-mode switching", by: ["AP"], desc: "Relaunch daemon in --xp-only every 55 min for 5 min for hack XP. Off = only the 'no hack income in this BN' case still uses --xp-only." },
     { id: "ap-install-augs", group: "Autopilot decisions", label: "Auto-install augs", by: ["AP"], desc: "Reserve money and run ascend.js (buy augs + INSTALL = soft reset) once enough augs are affordable." },
     { id: "ap-destroy-bn", group: "Autopilot decisions", label: "Auto-destroy BitNode", by: ["AP"], desc: "Destroy w0r1d_d43m0n and jump to the next BN as soon as a win condition is met." },
     { id: "ap-casino", group: "Autopilot decisions", label: "Casino run", by: ["AP"], scripts: ["casino.js"], desc: "Kills daemon + work, travels to Aevum and wins $10b at blackjack (takes over the UI, reloads the game)." },
