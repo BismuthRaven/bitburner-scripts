@@ -364,7 +364,7 @@ export async function main(ns) {
             { name: "go.js", module: "go", shouldRun: () => reqRam(64), minRamReq: 20.2 }, // Play go.js (various multipliers, but large dynamic ram requirements)
             { name: "stockmaster.js", module: "stockmaster", shouldRun: () => reqRam(64), args: openTailWindows ? ["--show-market-summary"] : [] }, // Start our stockmaster
             { name: "hacknet-upgrade-manager.js", module: "hacknet", shouldRun: () => shouldUpgradeHacknet(), args: ["-c", "--max-payoff-time", "1h", "--interval", "0"], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
-            { name: "spend-hacknet-hashes.js", module: "spend-hashes", shouldRun: () => reqRam(64) && 9 in dictSourceFiles, args: [], shouldTail: false }, // Always have this running to make sure hashes aren't wasted
+            { name: "spend-hacknet-hashes.js", module: "spend-hashes", shouldRun: () => reqRam(64) && 9 in dictSourceFiles, args: [], shouldTail: false, offloadFromHome: true }, // Always have this running to make sure hashes aren't wasted (6.7 GB; safe to offload off home)
             { name: "sleeve.js", module: "sleeve", shouldRun: () => reqRam(64) && 10 in dictSourceFiles }, // Script to create manage our sleeves for us
             { name: "gangs.js", module: "gangs", shouldRun: () => reqRam(64) && 2 in dictSourceFiles }, // Script to create manage our gang for us
             {
@@ -633,12 +633,17 @@ export async function main(ns) {
             if (verbose) log(ns, `INFO: Tool ${tool.name} is already running on server ${runningOnServer} as pid ${runningPid}.`);
             return true;
         }
-        // If all criteria pass, launch the script on home, or wherever we have space for it.
+        // Launch (or re-launch) a script on home, or offload it to a rooted non-home server with spare RAM
         const args = funcResultOrValue(tool.args) || []; // Support either a static args array, or a function returning the args.
         const lowHomeRam = homeServer.totalRam(true) < 32; // Special-case. In early BN1.1, when home RAM is <32 GB, allow certain scripts to be run on any host
-        const runResult = lowHomeRam ?
-            (await arbitraryExecution(ns, tool, 1, args, getServerByName(backupServerName).hasRoot() ? backupServerName : daemonHost)) :
-            (await exec(ns, tool.name, daemonHost, tool.runOptions, ...args));
+        const offloadHost = tool.offloadFromHome ? getAllServersByFreeRam().find(s =>
+            s.name != daemonHost && s.hasRoot() && !s.name.startsWith('hacknet-') &&
+            s.ramAvailable(true) >= tool.cost) : null;
+        const runResult = offloadHost ?
+            (await arbitraryExecution(ns, tool, 1, args, offloadHost.name)) :
+            lowHomeRam ?
+                (await arbitraryExecution(ns, tool, 1, args, getServerByName(backupServerName).hasRoot() ? backupServerName : daemonHost)) :
+                (await exec(ns, tool.name, daemonHost, tool.runOptions, ...args));
         if (runResult) {
             [runningOnServer, runningPid] = whichServerIsRunning(ns, tool.name, false);
             recentLaunches = [{ time: Date.now(), script: tool.name, args, pid: runningPid }, ...recentLaunches].slice(0, 15);
@@ -1255,9 +1260,14 @@ export async function main(ns) {
         ramAvailable(ignoreReservedRam = false) { return this.totalRam(ignoreReservedRam) - this.usedRam(); }
         growDelay() { return this.timeToWeaken() - this.timeToGrow() + cycleTimingDelay; }
         hackDelay() { return this.timeToWeaken() - this.timeToHack(); }
-        timeToWeaken() { return this.ns.getWeakenTime(this.name); }
-        timeToGrow() { return this.ns.getGrowTime(this.name); }
-        timeToHack() { return this.ns.getHackTime(this.name); }
+        // Exact Bitburner src/Hacking.ts formulas (saves 0.15 GB vs ns.getHackTime/getGrowTime/getWeakenTime)
+        timeToHack() {
+            const intBonus = 1 + Math.pow(_cachedPlayerInfo.skills.intelligence ?? 0, 0.8) / 600;
+            const skillFactor = (2.5 * this.requiredHackLevel * this.getSecurity() + 500) / (playerHackSkill() + 50);
+            return (5000 * skillFactor) / (_cachedPlayerInfo.mults.hacking_speed * bitNodeMults.HackingSpeedMultiplier * intBonus);
+        }
+        timeToGrow() { return 3.2 * this.timeToHack(); }
+        timeToWeaken() { return 4.0 * this.timeToHack(); }
     }
 
     // Helpers to get slices of info / cumulative stats across all rooted servers
@@ -2297,6 +2307,8 @@ export async function main(ns) {
             this.ignoreReservedRam = toolConfig.ignoreReservedRam ?? false;
             // Whether, in general, it's save to spread threads for this tool around to different servers (overridden in some cases)
             this.isThreadSpreadingAllowed = toolConfig.threadSpreadingAllowed === true;
+            // Whether this tool can be offloaded to a rooted non-home server with spare RAM to free up home RAM
+            this.offloadFromHome = toolConfig.offloadFromHome === true;
             // New option to control script RunOptions. By default, they are marked as temporary.
             this.runOptions = toolConfig.runOptions ?? { temporary: true };
         }

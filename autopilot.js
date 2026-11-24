@@ -1,5 +1,5 @@
 import {
-    log, getFilePath, getConfiguration, instanceCount, getNsDataThroughFile, runCommand, waitForProcessToComplete,
+    log, getFilePath, getConfiguration, instanceCount, getNsDataThroughFile, runCommand, waitForProcessToComplete_Custom,
     getActiveSourceFiles, tryGetBitNodeMultipliers, getStocksValue, unEscapeArrayArgs,
     formatMoney, formatDuration, formatNumber, getErrorInfo, tail, jsonReplacer
 } from './helpers.js'
@@ -485,6 +485,13 @@ export async function main(ns) {
         return await getNsDataThroughFile(ns, 'ns.ps(ns.args[0])', null, ['home']);
     }
 
+    /** Wait for a PID on home without importing ns.isRunning (saves 0.10 GB static RAM)
+     * @param {NS} ns */
+    async function waitForProcessToComplete(ns, pid, verbose = false) {
+        const isAlive = async (p) => (await getRunningScripts(ns)).some(proc => proc.pid === p);
+        return await waitForProcessToComplete_Custom(ns, isAlive, pid, verbose);
+    }
+
     /** Helper to get the first instance of a running script by name.
      * @param {NS} ns
      * @param {string} baseScriptName The name of a script (before applying getFilePath)
@@ -543,7 +550,10 @@ export async function main(ns) {
         }
 
         // Spend hacknet hashes on our boosting best hack-income server once established
-        let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
+        const spendHashesAll = await getNsDataThroughFile(ns,
+            `scanAllServers(ns).flatMap(h => ns.ps(h).filter(p => p.filename == ns.args[0] && p.args.includes('--spend-on-server')).map(p => ({ ...p, host: h })))`,
+            '/Temp/spend-hashes-boost-procs.txt', [getFilePath('spend-hacknet-hashes.js')]);
+        let existingSpendHashesProc = spendHashesAll[0];
         if ((9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
             && isModuleEnabled(ns, 'spend-hashes')
             && 0 != bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain) // No point in boosting hack income if it's scaled to 0 in the current BN
@@ -577,7 +587,7 @@ export async function main(ns) {
                         log(ns, `Identified that the best hack income server is ${bestServer} worth ${formatMoney(gain)}/sec.`);
                         const spendHashesArgs = ["--liquidate", "--spend-on-server", bestServer, "--spend-on", "Increase_Maximum_Money"];
                         if (shouldReduceMinSecurity) spendHashesArgs.push("--spend-on", "Reduce_Minimum_Security");
-                        launchScriptHelper(ns, 'spend-hacknet-hashes.js', spendHashesArgs);
+                        await launchOffloadHelper(ns, 'spend-hacknet-hashes.js', spendHashesArgs);
                     }
                 } else if (gain <= 1)
                     log_once(ns, `INFO: The best server (${bestServer})'s hack income multiplier (${formatNumber(gain)}) is currently too severely penalized ` +
@@ -1227,6 +1237,22 @@ export async function main(ns) {
                 (err ? `\nCaught: ${getErrorInfo(err)}` : ''), true, 'error');
         recentLaunches = [{ time: Date.now(), script: baseScriptName, args, pid }, ...recentLaunches].slice(0, 15);
         return pid;
+    }
+
+    /** Launch a self-contained script on a rooted non-home server with spare RAM (falls back to home) via /Tasks/launch-offload.js
+     * @param {NS} ns */
+    async function launchOffloadHelper(ns, baseScriptName, args = []) {
+        const scriptPath = getFilePath(baseScriptName);
+        const pid = launchScriptHelper(ns, '/Tasks/launch-offload.js', [scriptPath, ...args]);
+        if (pid) await waitForProcessToComplete(ns, pid);
+        try {
+            const res = JSON.parse(ns.read('/Temp/launch-offload.txt') || '{}');
+            if (res.pid) {
+                log(ns, `INFO: Offloaded ${baseScriptName} onto ${res.host} (pid: ${res.pid})`, true);
+                return res.pid;
+            }
+        } catch { /* fall through to home launch */ }
+        return launchScriptHelper(ns, baseScriptName, args);
     }
 
     let lastStatusLog = ""; // The current or last-assigned long-term status (what this script is waiting to happen)
