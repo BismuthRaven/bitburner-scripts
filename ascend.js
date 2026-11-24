@@ -6,6 +6,7 @@ import {
 const argsSchema = [
     ['install-augmentations', false], // By default, augs will only be purchased. Set this flag to install (a.k.a reset)
     /* OR */['reset', false], // An alias for the above flag, does the same thing.
+    ['no-purchase', false], // Skip purchasing additional augmentations (install only already-purchased augs)
     ['allow-soft-reset', false], // If set to true, allows ascend.js to invoke a **soft** reset (installs no augs) when no augs are affordable. This is useful e.g. when ascending rapidly to grind hacknet hash upgrades.
     ['skip-staneks-gift', false], // By default, we get stanek's gift before our first install (except in BN8). If set to true, skip this step.
     /* Deprecated */['bypass-stanek-warning', false], // (Obsoleted by the above option) Used to warn you if you were installing augs without accepting stanek's gift
@@ -100,14 +101,17 @@ export async function main(ns) {
     }
 
     // STEP 4: Buy as many desired augmentations as possible
-    log(ns, 'Purchasing augmentations...', true, 'info');
     const facmanArgs = ['--purchase', '-v'];
     if (options['skip-staneks-gift']) {
         log(ns, 'INFO: Sending the --ignore-stanek argument to faction-manager.js')
         facmanArgs.push('--ignore-stanek');
     }
-    pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
-    await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    if (!options['no-purchase']) {
+        log(ns, 'Purchasing augmentations...', true, 'info');
+        pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
+        await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    } else
+        log(ns, 'INFO: --no-purchase was set, skipping augmentation purchases and installing already-bought augmentations only.', true, 'info');
 
     // If we are not slated to install any augmentations, ABORT
     // Get owned + purchased augmentations, then installed augmentations. Ensure there's a difference
@@ -183,10 +187,12 @@ export async function main(ns) {
     */
 
     // STEP 4 REDUX: If somehow we have money left over and can afford some junk augs that weren't on our desired list, grab them too
-    log(ns, 'Seeing if we can afford any other augmentations...', true, 'info');
-    facmanArgs.push('--stat-desired', '_'); // Means buy any aug with any stats
-    pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
-    await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    if (!options['no-purchase']) {
+        log(ns, 'Seeing if we can afford any other augmentations...', true, 'info');
+        facmanArgs.push('--stat-desired', '_'); // Means buy any aug with any stats
+        pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
+        await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    }
 
     // Clean up our temp folder - it's good to do this once in a while to reduce the save footprint
     // As well as to ensure that data written out on this bitnode don't confuse scripts in the next one.

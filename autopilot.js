@@ -13,6 +13,7 @@ const argsSchema = [ // The set of all command line arguments
     ['install-at-aug-plus-nf-count', 20], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
     ['install-countdown', 10 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
+    ['aug-purchase-interval', 60 * 1000], // When buying augs without installing them ('Auto-buy augs' on, 'Auto-install augs' off), check for affordable augs this often
     ['time-before-boosting-best-hack-server', 10 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
     ['interval', 2 * 1000], // Wake up this often (milliseconds) to check on things
@@ -107,6 +108,7 @@ export async function main(ns) {
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
+    let lastAugPurchaseCheck = 0; // Last time we ran a buy-only purchase (rate-limits the RAM-heavy faction-manager runs)
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
     let loggedBnCompletion = false; // Flag set to ensure that if we choose to stay in the BN, we only log the "BN completed" message once per reset.
@@ -254,7 +256,7 @@ export async function main(ns) {
         await checkOnRunningScripts(ns, player);
         if (isModuleEnabled(ns, 'ap-casino')) await maybeDoCasino(ns, player);
         if (isModuleEnabled(ns, 'darknet')) await maybeRunDarknet(ns);
-        if (isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player);
+        if (isModuleEnabled(ns, 'ap-buy-augs') || isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player);
         publishStatus(ns); // Update the snapshot autopilot-gui.js reads (after the status text has been set)
         return shouldWeKeepRunning(ns); // Return false to shut down autopilot.js if we installed augs, or don't have enough home RAM
     }
@@ -858,6 +860,13 @@ export async function main(ns) {
     async function maybeInstallAugmentations(ns, player) {
         if (!(4 in unlockedSFs))  // Cannot automate augmentations or installs without singularity
             return setStatus(ns, `No singularity access, so you're on your own. You should manually work for factions and install augmentations!`);
+        // Buying and installing are separate switches in autopilot-gui.js: 'Auto-buy augs' purchases, 'Auto-install augs' resets
+        const canBuy = isModuleEnabled(ns, 'ap-buy-augs');
+        const canInstall = isModuleEnabled(ns, 'ap-install-augs');
+        if (!canBuy) { // Nothing to buy, so nothing to reserve
+            reservedPurchase = 0;
+            installCountdownResets = 0;
+        }
 
         // If we previously attempted to reserve money for an augmentation purchase order, do a fresh facman run to ensure it's still available
         if (reservedPurchase && installCountdown <= Date.now()) {
@@ -889,24 +898,25 @@ export async function main(ns) {
         const augsNeeded = Math.max(1, options['install-at-aug-count'] + sf11Level - reducedAugReq);
         const augsNeededInclNf = Math.max(1, options['install-at-aug-plus-nf-count'] + sf11Level - reducedAugReq);
 
-        // Get a count of pending augmentations (augs we plan to buy, plus any we've bought but not yet installed)
-        const pendingAugCount = facman.affordable_count_ex_nf + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
-        const pendingNfCount = facman.affordable_count_nf + facman.awaiting_install_count_nf; // Only neuroflux levels
+        // Get a count of pending augmentations (augs we plan to buy, plus any we've bought but not yet installed).
+        // When buying is off, only the ones already bought count - we won't be adding to them.
+        const pendingAugCount = (canBuy ? facman.affordable_count_ex_nf : 0) + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
+        const pendingNfCount = (canBuy ? facman.affordable_count_nf : 0) + facman.awaiting_install_count_nf; // Only neuroflux levels
         const pendingAugInclNfCount = pendingAugCount + pendingNfCount; // Includes neuroflux levels
         // Create a list of augmentations pending install or pending puchase to display. Group all nf augs into one.
         const strNF = "NeuroFlux Governor"
         let augsToInstall = facman.awaiting_install_augs.filter(aug => aug != strNF)
-            .concat(...facman.affordable_augs.filter(aug => aug != strNF));
+            .concat(...(canBuy ? facman.affordable_augs.filter(aug => aug != strNF) : []));
         if (pendingNfCount > 0)
             augsToInstall.push(`${strNF} (x${pendingNfCount})`)
 
         // Determine whether we can afford enough augmentations to merit a reset
-        let totalCost = facman.total_rep_cost + facman.total_aug_cost;
+        let totalCost = canBuy ? facman.total_rep_cost + facman.total_aug_cost : 0;
         const augSummary = `${pendingAugCount} of ${facman.unpurchased_count - 1} remaining augmentations` + // Unowned - 1 because we can always buy more Neuroflux
             (pendingNfCount > 0 ? ` + ${pendingNfCount} levels of NeuroFlux.` : '.') +
             (pendingAugCount > 0 ? `\n    Augs: [\"${augsToInstall.join("\", \"")}\"]` : '');
-        let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${augSummary}`
-        let shouldReset = options['install-for-augs'].some(a => facman.affordable_augs.includes(a)) ||
+        let resetStatus = canBuy ? `Reserving ${formatMoney(totalCost)} to install ${augSummary}` : `Ready to install ${augSummary}`
+        let shouldReset = (canBuy && options['install-for-augs'].some(a => facman.affordable_augs.includes(a))) ||
             pendingAugCount >= augsNeeded || pendingAugInclNfCount >= augsNeededInclNf;
 
         // If we are in Daedalus, and we do not yet have enough favour to unlock rep donations with Daedalus,
@@ -919,7 +929,7 @@ export async function main(ns) {
         ) {
             shouldReset = true;
             resetStatus = `We have enough reputation with Daedalus to unlock donations on our next reset.\n${resetStatus}`;
-            if (totalCost == 0) totalCost = 1; // Hack, logic below expects some non-zero reserve in preparation for ascending.
+            if (canBuy && totalCost == 0) totalCost = 1; // Hack, logic below expects some non-zero reserve in preparation for ascending.
         }
 
         // Heuristic: if we can afford 4 or more augs in the first ~20 minutes, it's usually worth doing a "quick install"
@@ -940,17 +950,23 @@ export async function main(ns) {
         // If not ready to reset, set a status with our progress and return
         if (!shouldReset) {
             setStatus(ns, `Currently at ${formatDuration(getTimeInAug())} since last aug. ` +
-                `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` +
+                (canBuy ? `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` :
+                    `Waiting for ${augsNeeded} augs (or ${augsNeededInclNf} including NeuroFlux levels) to be bought before installing.`) +
                 `\nCan currently get: ${augSummary}` + (pendingAugCount == 0 ? '' : `\n  Total Cost: ${formatMoney(totalCost)}`) +
                 ` (\`run faction-manager.js\` for details)`, augSummary);
             return reservedPurchase = 0; // If we were previously reserving money for a purchase, reset that flag now
         }
+        // Buy-only mode ('Auto-install augs' off): purchase the batch autopilot would have installed, then stop short of resetting
+        if (!canInstall) return await buyAffordableAugs(ns, facman, augSummary);
         // If we want to reset, but there is a reason to delay, don't reset
         if (await shouldDelayInstall(ns, player, facman)) // If we're currently in a state where we should not be resetting, skip reset logic
             return reservedPurchase = 0;
 
+        // Install-only mode has nothing to buy, but still give the usual heads-up before the reset
+        if (!canBuy && installCountdown == 0) installCountdown = Date.now() + options['install-countdown'];
+
         // Ensure the money needed for the above augs doesn't get ripped out from under us by reserving it
-        if (reservedPurchase < totalCost) {
+        if (canBuy && reservedPurchase < totalCost) {
             // A countdown is displayed to give the user a heads up, and give us time to potentially earn money for more augmentations
             if (reservedPurchase == 0)
                 installCountdown = Date.now() + options['install-countdown'];
@@ -990,6 +1006,10 @@ export async function main(ns) {
         // Kick off ascend.js
         let errLog;
         const ascendArgs = ['--install-augmentations', true, '--on-reset-script', ns.getScriptName()]
+        if (!canBuy)
+            ascendArgs.push('--no-purchase');
+        if (!isModuleEnabled(ns, 'stanek'))
+            ascendArgs.push('--skip-staneks-gift');
         if (pendingAugInclNfCount == 0) // If we know we would install 0 augs, but still wish to reset, we must enable soft resetting
             ascendArgs.push("--allow-soft-reset")
         let pid = launchScriptHelper(ns, 'ascend.js', ascendArgs);
@@ -1001,6 +1021,50 @@ export async function main(ns) {
             errLog = `ERROR: Failed to launch ascend.js (pid == 0). Will try again later`;
         // If we got this far, something went wrong
         persist_log(ns, log(ns, errLog, true, 'error'));
+    }
+
+    /** Buy-only mode ('Auto-buy augs' on, 'Auto-install augs' off): purchase the affordable batch via faction-manager.js without resetting.
+     * @param {NS} ns */
+    async function buyAffordableAugs(ns, facman, augSummary) {
+        installCountdown = 0;
+        installCountdownResets = 0;
+        if (facman.affordable_count <= 0) {
+            setStatus(ns, `Ready to install ${augSummary}\n  'Auto-install augs' is off - run ascend.js or switch it on when ready to reset.`, augSummary);
+            return reservedPurchase = 0;
+        }
+        if (Date.now() - lastAugPurchaseCheck < options['aug-purchase-interval']) {
+            setStatus(ns, `Waiting to purchase ${facman.affordable_count} affordable augs (${augSummary})`, augSummary);
+            return reservedPurchase = facman.total_rep_cost + facman.total_aug_cost;
+        }
+        lastAugPurchaseCheck = Date.now();
+        // Accept Stanek's gift before our first augmentation purchase (outside BN8) unless Stanek is switched off
+        const facmanArgs = ['--purchase', '--verbose', 'false'];
+        if (13 in unlockedSFs) {
+            if (resetInfo.currentNode == 8 || !isModuleEnabled(ns, 'stanek'))
+                facmanArgs.push('--ignore-stanek');
+            else if (!acceptedStanek && !installedAugmentations.includes(augStanek) && facman.purchased_count <= 1) {
+                if (await getNsDataThroughFile(ns, 'ns.stanek.acceptGift()')) {
+                    log(ns, `SUCCESS: Accepted Stanek's Gift before purchasing augmentations!`, true, 'success');
+                    installedAugmentations.push(augStanek);
+                    acceptedStanek = true;
+                } else facmanArgs.push('--ignore-stanek');
+            }
+        }
+        // faction-manager.js refuses --purchase while holding stocks; liquidate first if needed (checkOnRunningScripts relaunches stockmaster)
+        if ((await getStocksValue(ns)) > 0) {
+            log(ns, `INFO: Liquidating stocks to purchase ${facman.affordable_count} augmentations...`, true, 'info');
+            const liqPid = launchScriptHelper(ns, 'stockmaster.js', ['--liquidate']);
+            if (liqPid) await waitForProcessToComplete(ns, liqPid, true);
+        }
+        ns.write("MachineState/CashReserve.txt", 0, "w");
+        log(ns, `INFO: Purchasing ${facman.affordable_count} augmentations ('Auto-install augs' is off, not resetting): ${augSummary}`, true, 'info');
+        const pid = launchScriptHelper(ns, 'faction-manager.js', facmanArgs);
+        if (pid) {
+            await waitForProcessToComplete(ns, pid, true);
+            const refreshPid = launchScriptHelper(ns, 'faction-manager.js', ['--verbose', 'false']);
+            if (refreshPid) await waitForProcessToComplete(ns, refreshPid, true);
+        }
+        return reservedPurchase = 0;
     }
 
     /** Logic to detect if we are close to a milestone and should postpone installing augmentations until it is hit

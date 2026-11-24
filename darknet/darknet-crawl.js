@@ -155,6 +155,8 @@ export const report = (ns, state, host, neighbours) => {
     stationary: details?.isStationary ?? true,
     maxRam: ns.getServerMaxRam(host),
     blockedRam: details?.blockedRam ?? 0,
+    caches: host === "home" ? 0 : ns.ls(host, ".cache").filter((name) => name.endsWith(".cache")).length,
+    stormSeed: host !== "home" && ns.fileExists("STORM_SEED.exe", host),
     contracts: ns.ls(host, ".cct"),
   };
   ns.writePort(options["report-port"], JSON.stringify(node));

@@ -10,5 +10,8 @@
   "notes-file": "/data/darknet-notes.txt",
   "contract-ms": 60000,
   "cross-air-gaps": true,
-  "verbose": false
+  "verbose": false,
+  "unleash-storm-seed": true,
+  "storm-min-coverage": 1,
+  "storm-settle-ms": 60000
 }
