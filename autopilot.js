@@ -18,7 +18,7 @@ const argsSchema = [ // The set of all command line arguments
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
     ['interval', 2 * 1000], // Wake up this often (milliseconds) to check on things
     ['interval-check-scripts', 5 * 1000], // Get a listing of all running processes on home this frequently
-    ['high-hack-threshold', 5000], // Once hack level reaches this, we start daemon in high-performance hacking mode
+    ['high-hack-threshold', 3000], // Once hack level reaches this, we start daemon in high-performance hacking mode
     ['enable-bladeburner', null], // (Deprecated) Bladeburner is now always enabled if it's available. Use '--disable-bladeburner' to explicitly turn off
     ['disable-bladeburner', false], // This will instruct daemon.js not to run the bladeburner.js, even if bladeburner is available.
     ['wait-for-4s-threshold', 0.8], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
@@ -28,8 +28,8 @@ const argsSchema = [ // The set of all command line arguments
     ['spend-hashes-on-server-hacking-threshold', 0.15], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
-    ['xp-mode-interval-minutes', 20], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
-    ['xp-mode-duration-minutes', 2], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
+    ['xp-mode-interval-minutes', 30], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
+    ['xp-mode-duration-minutes', 1], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
     ['no-tail-windows', true], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
 ];
 
@@ -606,9 +606,9 @@ export async function main(ns) {
                 // Log a special notice if we're going to be relaunching daemon.js for this reason
                 if (!existingDaemon || !(existingDaemon.args.includes("--looping-mode")))
                     daemonRelaunchMessage = `Hack level (${player.skills.hacking}) is >= ${hackThreshold} (--high-hack-threshold): Starting daemon.js in high-performance hacking mode.`;
-            } else if (player.skills.hacking >= hackThreshold) { // "tight" mode. Tighter batches to increase income rate, at the cost of more frequent misfires
-                daemonArgs = ["--cycle-timing-delay", 40, "--queue-delay", 50, "--silent-misfires",
-                    "--recovery-thread-padding", Math.min(5.0, player.skills.hacking / hackThreshold)]; // Use more recovery thread padding as our hack level increases
+            } else if (player.skills.hacking >= hackThreshold) { // "tight" mode. Tighter batches to increase income rate, tuned against Bitburner timer jitter
+                daemonArgs = ["--cycle-timing-delay", 120, "--queue-delay", 150, "--max-batches", 120, "--silent-misfires",
+                    "--recovery-thread-padding", Math.min(2.0, 1.15 + (player.skills.hacking - hackThreshold) / (hackThreshold * 10))];
             }
             else if (homeRam < 32) { // If we're in early BN 1.1 (i.e. with < 32GB home RAM), avoid squandering RAM
                 daemonArgs.push("--no-share", "--initial-max-targets", 1);

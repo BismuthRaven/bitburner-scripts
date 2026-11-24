@@ -51,11 +51,11 @@ const argsSchema = [
 
     // Batch script fine-tuning flags
     ['initial-max-targets', undefined], // Initial number of servers to target / prep (default is 2 + 1 for every 500 TB of RAM on the network)
-    ['cycle-timing-delay', 5000], // (ms) Length of a hack cycle. The smaller this is, the more batches (HWGW) we can schedule before the first cycle fires, but the greater the chance of a misfire
-    ['queue-delay', 1000], // (ms) Delay before the first script begins, to give time for all scripts to be scheduled
+    ['cycle-timing-delay', 400], // (ms) Length of a hack cycle (4 steps of 100ms). Tuned via .tools/daemon-sim against Bitburner source formulas + timer jitter
+    ['queue-delay', 250], // (ms) Delay before the first script begins, to give time for all scripts to be scheduled
     ['recovery-thread-padding', 1], // Multiply the number of grow/weaken threads needed by this amount to automatically recover more quickly from misfires.
-    ['max-batches', 40], // Maximum overlapping cycles to schedule in advance. Note that once scheduled, we must wait for all batches to complete before we can schedule more
-    ['max-steal-percentage', 0.70], // Don't steal more than this in case something goes wrong with timing or scheduling, it's hard to recover from
+    ['max-batches', 120], // Maximum overlapping cycles to schedule in advance. Note that once scheduled, we must wait for all batches to complete before we can schedule more
+    ['max-steal-percentage', 0.80], // Don't steal more than this in case something goes wrong with timing or scheduling, it's hard to recover from
 
     ['looping-mode', false], // Set to true to attempt to schedule perpetually-looping tasks.
 
@@ -1379,7 +1379,8 @@ export async function main(ns) {
                 increment = Math.max(1, Math.floor((increment / 2.0).toPrecision(14)));
                 lastAdjustmentSign = adjustment === 0.00 ? lastAdjustmentSign : Math.sign(adjustment);
             }
-            newHackThreads = Math.max(newHackThreads + adjustment, 0); // Adjust the percentage to steal with pefect precision by actually adjusting the number of hack threads
+            // Don't drive hack threads to 0 if at least 1 batch fits in RAM (partial wave is better than 0 batches)
+            newHackThreads = Math.max(newHackThreads + adjustment, performanceSnapshot.canBeScheduled ? 1 : 0);
             currentTarget.percentageToSteal = Math.max(0, newHackThreads * percentPerHackThread);
         }
         if (attempts >= maxAdjustments || verbose && currentTarget.actualPercentageToSteal() != oldActualPercentageToSteal) {
@@ -1404,10 +1405,14 @@ export async function main(ns) {
     function analyzeSnapshot(ns, snapshot, currentTarget, networkStats, incrementalHackThreads) {
         const maxPercentageToSteal = options['max-steal-percentage'];
         const lastP2steal = currentTarget.percentageToSteal;
-        // Priority is to use as close to the target ram as possible overshooting.
+        // Priority is to use as close to the target ram as possible without overshooting.
         const isOvershot = s => !s.canBeScheduled || s.maxCompleteCycles < s.optimalPacedCycles;
         if (verbose && runOnce)
             log(ns, `canBeScheduled: ${snapshot.canBeScheduled},  maxCompleteCycles: ${snapshot.maxCompleteCycles}, optimalPacedCycles: ${snapshot.optimalPacedCycles}`);
+        // At 1 hack thread, if at least one batch fits, accept fewer than optimalPacedCycles rather than dropping to 0 threads
+        if (currentTarget.getHackThreadsNeeded() <= 1 && snapshot.canBeScheduled) {
+            return 0.00;
+        }
         if (isOvershot(snapshot)) {
             return -incrementalHackThreads;
         } else if (snapshot.maxCompleteCycles > snapshot.optimalPacedCycles && lastP2steal < maxPercentageToSteal) {
