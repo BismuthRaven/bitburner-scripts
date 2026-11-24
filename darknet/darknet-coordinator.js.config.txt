@@ -1,9 +1,9 @@
 {
   "max-backdoors": 2,
-  "relink-depth": 3,
+  "relink-depth": 2,
   "fresh-ms": 90000,
   "forget-ms": 900000,
-  "plan-ms": 10000,
+  "plan-ms": 5000,
   "backdoor-retry-ms": 300000,
   "backdoor-min-gain": 8,
   "max-passwords": 500,
@@ -12,6 +12,6 @@
   "cross-air-gaps": true,
   "verbose": false,
   "unleash-storm-seed": true,
-  "storm-min-coverage": 1,
-  "storm-settle-ms": 60000
+  "storm-min-coverage": 0.9,
+  "storm-settle-ms": 20000
 }

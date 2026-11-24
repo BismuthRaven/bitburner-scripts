@@ -27,10 +27,10 @@ const argsSchema = [
   ["state-file", "/data/darknet-state.json"], // saved passwords and nodes (from darknet-daemon.js)
   ["max-known-passwords", 300], // passwords handed to relaunched instances (from darknet-daemon.js)
   ["max-backdoors", 2], // game adds instability above 2 backdoors; 0 disables
-  ["relink-depth", 3], // move a stasis link when a held server is this many levels deeper than the shallowest link
+  ["relink-depth", 2], // move a stasis link when a held server is this many levels deeper than the shallowest link
   ["fresh-ms", 90000], // node reports older than this are ignored for planning / routing
   ["forget-ms", 900000], // drop node reports older than this
-  ["plan-ms", 10000], // planning interval
+  ["plan-ms", 5000], // planning interval
   ["backdoor-retry-ms", 300000], // wait before retrying a backdoor on the same server
   ["backdoor-min-rooted", 8], // rooted servers needed before any backdoor
   ["backdoor-min-gain", 8], // terminal hops a backdoor must save across the known net
@@ -39,8 +39,8 @@ const argsSchema = [
   ["contract-ms", 60000], // min time between contractor.js runs
   ["cross-air-gaps", true], // induce migrations to carry instances across air gaps towards the labyrinth
   ["unleash-storm-seed", true], // trigger STORM_SEED.exe once reachable net is covered and looted to refresh caches/XP
-  ["storm-min-coverage", 1.0], // fraction of discovered non-lab servers reporting before unleashing a storm (1.0 = 100%)
-  ["storm-settle-ms", 60000], // how long coverage/loot checks must hold steady before unleashing
+  ["storm-min-coverage", 0.90], // fraction of discovered non-lab servers reporting before unleashing a storm
+  ["storm-settle-ms", 20000], // how long coverage/loot checks must hold steady before unleashing
   ["verbose", false], // also log every password learned and relaunch check
 ];
 // Defaults until main() loads the config (also used when tests call the planners directly)
