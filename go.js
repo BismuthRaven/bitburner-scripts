@@ -18,9 +18,9 @@ import { GoBoard, BLACK, selectBestMove, findSnakeEyesTarget } from './go-engine
 const argsSchema = [
     ['cheats', true], // (Now true by default - but still an option for backwards compatibility) This is only possible if you have BN14.2
     ['disable-cheats', false], // Set to true if you want to *not* use cheats for some reason.
-    ['cheat-chance-threshold', 0.9], // Don't cheat if our success chance is less than this
-    ['think-time', 120], // MCTS think time per move in ms (higher = stronger, still well under opponent turn delay)
-    ['max-sims', 2000], // Maximum MCTS simulations per move
+    ['cheat-chance-threshold', 0.8], // Don't cheat if our success chance is less than this
+    ['think-time', 180], // MCTS think time per move in ms (higher = stronger, still well under opponent turn delay)
+    ['max-sims', 2500], // Maximum MCTS simulations per move
     ['legacy', false], // Fall back to the original heuristic pattern player instead of MCTS+RAVE
     ['logtime', false], // Logs time time it takes for each player to take their move
     ['runOnce', false], // Will only play one game if enabled
@@ -37,9 +37,9 @@ export function autocomplete(data, args) {
  * @param {NS} ns */
 export async function main(ns) {
     let cheats = false;
-    let cheatChanceThreshold = 1.0;
-    let thinkTimeMs = 120;
-    let maxSims = 2000;
+    let cheatChanceThreshold = 0.8;
+    let thinkTimeMs = 180;
+    let maxSims = 2500;
     let useLegacy = false;
     let logtime = false;
     let runOnce = true;
@@ -175,6 +175,7 @@ export async function main(ns) {
         let lastOpponentResult = await ns.go.opponentNextTurn(false)
         checkNewGame(ns, lastOpponentResult)
         let playStyle = getStyle(ns);
+        ns.printf("Playing as Black (X) vs %s (White / O) [%dx%d]", ns.go.getOpponent(), startBoard.length, startBoard.length);
         while (true) {
             turn++
             board = await go_getBoardState(ns);
@@ -215,7 +216,7 @@ export async function main(ns) {
                     if (choice.type === "move") {
                         results = await movePiece(ns, { coords: [choice.x, choice.y], msg: choice.msg });
                     } else {
-                        ns.printf("%s", choice.msg);
+                        ns.printf("[Black] %s", choice.msg);
                         results = await ns.go.passTurn();
                     }
                 }
@@ -399,6 +400,7 @@ export async function main(ns) {
             catch { ns.go.resetBoardState(opponent[Math.floor(Math.random() * opponent.length)], 13) }
             turn = 0
             ns.clearLog()
+            ns.printf("Playing as Black (X) vs %s (White / O) [13x13]", ns.go.getOpponent());
             return true
         }
         return false
@@ -1339,7 +1341,7 @@ export async function main(ns) {
         const [x, y] = attack.coords
         if (x === undefined) return false
         let mid = performance.now()
-        ns.printf("%s", attack.msg)
+        ns.printf("[Black] %s", attack.msg)
         const results = await go_makeMove(ns, x, y);
         let END = performance.now()
         if (logtime) ns.printf("Time: Me: %s  Them: %s", formatTime(ns, mid - START, true), formatTime(ns, END - mid, true))
@@ -1357,7 +1359,7 @@ export async function main(ns) {
         try {
             let mid = performance.now()
             const results = await go_cheat_playTwoMoves(ns, s1x, s1y, s2x, s2y)
-            ns.printf("%s  Chance: %.2f%%  Result: %s", attack.msg, chance * 100, results.type);
+            ns.printf("[Black] %s  Chance: %.2f%%  Result: %s", attack.msg, chance * 100, results.type);
             let END = performance.now()
             if (logtime) ns.printf("Time: Me: %s  Them: %s", formatTime(ns, mid - START, true), formatTime(ns, END - mid, true))
             START = performance.now()
