@@ -4,10 +4,12 @@
  * Settings: argsSchema, darknet/darknet-coordinator.js.config.txt or command line; shared ones arrive as args from darknet-daemon.js.
  */
 import { getConfiguration, getFnRunViaNsExec, getNsDataThroughFile_Custom, log as logToTail, formatRam } from "../helpers.js";
+import { isTerminalInUse } from "../helpers-gui.js";
 import { BACKDOOR_WORKER, KNOWN_FILE, WORM, RELAUNCH_WORKER, STASIS_WORKER, samePath } from "./darknet-paths.js";
 
 const CRAWLER = WORM;
 const CONTRACTOR = "/Tasks/contractor.js";
+const CONTRACTOR_PEAK_RAM = 14.2; // contractor.js briefly needs a 6.6 GB temp script, then the 11.6 GB solver (daemon.js uses the same minRamReq)
 const DARKSCAPE = "DarkscapeNavigator.exe";
 const TOR_BUYER = "/Tasks/tor-manager.js";
 const PROGRAM_BUYER = "/Tasks/program-manager.js";
@@ -25,10 +27,10 @@ const argsSchema = [
   ["state-file", "/data/darknet-state.json"], // saved passwords and nodes (from darknet-daemon.js)
   ["max-known-passwords", 300], // passwords handed to relaunched instances (from darknet-daemon.js)
   ["max-backdoors", 2], // game adds instability above 2 backdoors; 0 disables
-  ["relink-depth", 3], // move a stasis link when a held server is this many levels deeper than the shallowest link
+  ["relink-depth", 2], // move a stasis link when a held server is this many levels deeper than the shallowest link
   ["fresh-ms", 90000], // node reports older than this are ignored for planning / routing
   ["forget-ms", 900000], // drop node reports older than this
-  ["plan-ms", 10000], // planning interval
+  ["plan-ms", 5000], // planning interval
   ["backdoor-retry-ms", 300000], // wait before retrying a backdoor on the same server
   ["backdoor-min-rooted", 8], // rooted servers needed before any backdoor
   ["backdoor-min-gain", 8], // terminal hops a backdoor must save across the known net
@@ -36,6 +38,9 @@ const argsSchema = [
   ["notes-file", "/data/darknet-notes.txt"], // clue/lore notes archive (read with cat)
   ["contract-ms", 60000], // min time between contractor.js runs
   ["cross-air-gaps", true], // induce migrations to carry instances across air gaps towards the labyrinth
+  ["unleash-storm-seed", true], // trigger STORM_SEED.exe once reachable net is covered and looted to refresh caches/XP
+  ["storm-min-coverage", 0.90], // fraction of discovered non-lab servers reporting before unleashing a storm
+  ["storm-settle-ms", 20000], // how long coverage/loot checks must hold steady before unleashing
   ["verbose", false], // also log every password learned and relaunch check
 ];
 // Defaults until main() loads the config (also used when tests call the planners directly)
@@ -63,6 +68,7 @@ export async function main(ns) {
     lastPlan: 0,
     lastLog: new Map(),
     lastContractRun: 0,
+    stormReadySince: 0,
     // Notes are archived as "[file @ host] text"; dedupe on text since lore repeats across servers
     notesSeen: new Set(ns.read(options["notes-file"]).split("\n").map((line) => line.replace(/^\[[^\]]*\] /, "")).filter(Boolean)),
   };
@@ -176,6 +182,12 @@ const drainReports = (ns, state) => {
       } else {
         logChanged(ns, state, `relaunch-${message.host}`, `WARNING: ${CRAWLER} isn't running on ${message.host}: ${message.message}`);
       }
+    } else if (message.type === "storm" && message.ok) {
+      state.stormReadySince = 0;
+      if (state.nodes[message.host]) {
+        state.nodes[message.host].stormSeed = false;
+      }
+      log(ns, `SUCCESS: Webstorm unleashed from ${message.host}: ${message.message}`);
     }
   }
   const hosts = Object.keys(state.passwords);
@@ -201,15 +213,21 @@ const plan = async (ns, state, hasSingularity) => {
     (host) => !linked.includes(host) && !isStationary(state, host) && status.get(host) === BACKDOORED,
   );
   const labBackdoored = !!lab && status.get(lab.name) === BACKDOORED;
+  const labCleared = !!lab && (status.get(lab.name) === ROOTED || status.get(lab.name) === BACKDOORED);
   const neededRam = ns.getScriptRam(CRAWLER) + ns.getScriptRam(STASIS_WORKER);
   const limit = ns.dnet.getStasisLinkLimit();
   const control = planStasis(state, linked, limit, neededRam, now, lab);
   const migration = options["cross-air-gaps"] ? planMigration(state, linked, lab, now) : { plan: null, reason: "INFO: Air-gap crossing is off (cross-air-gaps)." };
+  const storm = options["unleash-storm-seed"]
+    ? planStormSeed(state, linked, lab, labCleared, now)
+    : { plan: null, reason: "" };
   control.migrate = migration.plan;
+  control.storm = storm.plan;
   ns.clearPort(options["control-port"]);
   ns.writePort(options["control-port"], JSON.stringify(control));
   logChanged(ns, state, "stasis", describeStasisPlan(state, control, linked, limit, neededRam, lab));
   logChanged(ns, state, "migrate", migration.reason);
+  logChanged(ns, state, "storm", storm.reason);
 
   const anchors = [...linked, ...backdoored, ...(labBackdoored ? [lab.name] : [])];
   for (const host of new Set(anchors)) {
@@ -221,6 +239,9 @@ const plan = async (ns, state, hasSingularity) => {
     logChanged(ns, state, "backdoor", "");
   } else if (isRunningOn(ns, "home", BACKDOOR_WORKER)) {
     logChanged(ns, state, "backdoor", `INFO: ${BACKDOOR_WORKER} is still heading to its target...`);
+  } else if (isTerminalInUse()) {
+    // installBackdoor only works on the player's current server, so backdooring always moves the terminal
+    logChanged(ns, state, "backdoor", "INFO: Backdoors wait while the terminal is in use (focused or has text): they move the terminal between servers.");
   } else if (!(lab && !labBackdoored && options["max-backdoors"] > 0 && planLabBackdoor(ns, state, anchors, lab, now))) {
     planBackdoor(ns, state, anchors, backdoored, now);
   }
@@ -324,10 +345,84 @@ export const planMigration = (state, linked, lab, now) => {
   };
 };
 
+/**
+ * Decides whether to unleash STORM_SEED.exe. A webstorm deletes ~60% of movable servers and respawns fresh ones
+ * (new first-auth caches, RAM-block clear caches, and 10x first-auth charisma XP), while leaving stasis-linked
+ * servers and the labyrinth untouched. We wait until all pending loot is collected and coverage is saturated.
+ * Returns { plan: { host } | null, reason }.
+ */
+export const planStormSeed = (state, linked, lab, labCleared, now) => {
+  const fresh = Object.values(state.nodes).filter((node) => now - node.seen <= options["fresh-ms"] && node.host !== "home");
+  const holder = fresh.find((node) => node.stormSeed);
+  if (!holder) {
+    state.stormReadySince = 0;
+    return { plan: null, reason: "" };
+  }
+  const wait = (why) => {
+    state.stormReadySince = 0;
+    return { plan: null, reason: `INFO: Holding STORM_SEED.exe on ${holder.host}: ${why}` };
+  };
+
+  const pendingCaches = fresh.reduce((sum, node) => sum + (node.caches ?? 0), 0);
+  if (pendingCaches > 0) {
+    return wait(`${plural(pendingCaches, "unopened cache")} left on reporting servers.`);
+  }
+  const pendingContracts = fresh.reduce((sum, node) => sum + (node.contracts?.length ?? 0), 0);
+  if (pendingContracts > 0) {
+    return wait(`${plural(pendingContracts, "coding contract")} left on reporting servers.`);
+  }
+  const blockedHosts = fresh.filter((node) => (node.blockedRam ?? 0) > 0 && !isStationary(state, node.host));
+  if (blockedHosts.length > 0) {
+    return wait(`${plural(blockedHosts.length, "server")} still clearing blocked RAM (clearing drops a guaranteed cache).`);
+  }
+
+  // Every neighbour reported by a fresh worm (excluding home and the labyrinth) should itself be reporting
+  const nonLabFresh = fresh.filter((node) => !LAB_NAMES.includes(node.host));
+  const reported = new Set(nonLabFresh.map((node) => node.host));
+  const discovered = new Set(reported);
+  for (const node of nonLabFresh) {
+    for (const neighbour of node.neighbours ?? []) {
+      if (neighbour !== "home" && !LAB_NAMES.includes(neighbour)) {
+        discovered.add(neighbour);
+      }
+    }
+  }
+  const coverage = discovered.size > 0 ? reported.size / discovered.size : 0;
+  if (coverage < options["storm-min-coverage"]) {
+    return wait(`coverage ${(coverage * 100).toFixed(0)}% (${reported.size}/${discovered.size} discovered servers reporting; need ${(options["storm-min-coverage"] * 100).toFixed(0)}%).`);
+  }
+
+  // If the labyrinth exists, wait until it's cleared (or at least a stasis gateway is locked next to it) so we don't wipe progress toward it
+  if (lab && !labCleared) {
+    const hasLabGatewayLink = linked.some((host) => state.nodes[host] && isLabGateway(state, lab, state.nodes[host]));
+    if (!hasLabGatewayLink) {
+      return wait(`labyrinth ${lab.name} isn't cleared yet and no stasis-linked gateway holds access to it.`);
+    }
+  }
+
+  if (!state.stormReadySince) {
+    state.stormReadySince = now;
+  }
+  const remaining = options["storm-settle-ms"] - (now - state.stormReadySince);
+  if (remaining > 0) {
+    return {
+      plan: null,
+      reason: `INFO: STORM_SEED.exe on ${holder.host} ready (${(coverage * 100).toFixed(0)}% coverage, all loot cleared); settling for ${Math.ceil(remaining / 1000)}s before unleashing.`,
+    };
+  }
+  return {
+    plan: { host: holder.host },
+    reason: `INFO: Ordering ${holder.host} to unleash STORM_SEED.exe (${(coverage * 100).toFixed(0)}% coverage, all caches/RAM-blocks/contracts cleared): refreshing the darknet for new loot and XP.`,
+  };
+};
+
 /** ns.scan misses darknet servers, so contractor.js gets the contract hosts as args. */
 const runContractor = (ns, state, hosts, now) => {
   if (hosts.length === 0 || now - state.lastContractRun < options["contract-ms"] || isRunningOn(ns, "home", CONTRACTOR)) {
     return;
+  }
+  if (ns.getServerMaxRam("home") - ns.getServerUsedRam("home") < CONTRACTOR_PEAK_RAM) {
+    return; // keep the contract list; retried next loop once home has room for the solver
   }
   state.lastContractRun = now;
   const count = hosts.reduce((sum, host) => sum + state.nodes[host].contracts.length, 0);
@@ -533,15 +628,16 @@ const isRunningOn = (ns, host, script) => {
 // Server states from serverStatus
 const MISSING = 0;
 const PRESENT = 1;
-const BACKDOORED = 2;
-/** One temp script per plan (getServer costs 2 GB). Returns Map host -> MISSING | PRESENT | BACKDOORED. */
+const ROOTED = 2;
+const BACKDOORED = 3;
+/** One temp script per plan (getServer costs 2 GB). Returns Map host -> MISSING | PRESENT | ROOTED | BACKDOORED. */
 const serverStatus = async (ns, hosts) => {
   const unique = [...new Set(hosts)];
   if (unique.length === 0) {
     return new Map();
   }
   const codes = await nsData(ns,
-    "ns.args.map((h) => { try { return !ns.serverExists(h) ? 0 : ns.getServer(h).backdoorInstalled ? 2 : 1; } catch { return 0; } })",
+    "ns.args.map((h) => { try { if (!ns.serverExists(h)) return 0; const s = ns.getServer(h); return s.backdoorInstalled ? 3 : s.hasAdminRights ? 2 : 1; } catch { return 0; } })",
     "/Temp/darknet-server-status.txt", unique);
   return new Map(unique.map((host, i) => [host, codes[i]]));
 };

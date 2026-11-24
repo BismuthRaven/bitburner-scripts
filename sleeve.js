@@ -9,7 +9,7 @@ const argsSchema = [
     ['aug-budget', 0.1], // Spend up to this much of current cash on augs per tick (Default is high, because these are permanent for the rest of the BN)
     ['buy-cooldown', 60 * 1000], // Must wait this may milliseconds before buying more augs for a sleeve
     ['min-aug-batch', 20], // Must be able to afford at least this many augs before we pull the trigger (or fewer if buying all remaining augs)
-    ['reserve', null], // Reserve this much cash before determining spending budgets (defaults to contents of reserve.txt if not specified)
+    ['reserve', null], // Reserve this much cash before determining spending budgets (defaults to contents of MachineState/CashReserve.txt if not specified)
     ['disable-follow-player', false], // Set to true to disable having Sleeve 0 work for the same faction/company as the player to boost reputation gain rates
     ['disable-training', false], // Set to true to disable having sleeves workout at the gym (costs money)
     ['train-to-strength', 105], // Sleeves will go to the gym until they reach this much Str
@@ -18,7 +18,7 @@ const argsSchema = [
     ['train-to-agility', 70], // Sleeves will go to the gym until they reach this much Agi
     ['study-to-hacking', 25], // Sleeves will go to university until they reach this much Hak
     ['study-to-charisma', 25], // Sleeves will go to university until they reach this much Cha
-    ['training-reserve', null], // Defaults to global reserve.txt. Can be set to a negative number to allow debt. Sleeves will not train if money is below this amount.
+    ['training-reserve', null], // Defaults to global MachineState/CashReserve.txt. Can be set to a negative number to allow debt. Sleeves will not train if money is below this amount.
     ['training-cap-seconds', 2 * 60 * 60 /* 2 hours */], // Time since the start of the bitnode after which we will no longer attempt to train sleeves to their target "train-to" settings
     ['disable-spending-hashes-for-gym-upgrades', false], // Set to true to disable spending hashes on gym upgrades when training up sleeves.
     ['disable-spending-hashes-for-study-upgrades', false], // Set to true to disable spending hashes on study upgrades when smarting up sleeves.
@@ -139,7 +139,7 @@ async function mainLoop(ns) {
         playerInBladeburner = await getNsDataThroughFile(ns, 'ns.bladeburner.inBladeburner()');
     const playerWorkInfo = await getCurrentWorkInfo(ns);
     if (!playerInGang) playerInGang = !(2 in ownedSourceFiles) ? false : await getNsDataThroughFile(ns, 'ns.gang.inGang()');
-    let globalReserve = Number(ns.read("reserve.txt") || 0);
+    let globalReserve = Number(ns.read("MachineState/CashReserve.txt") || 0);
     let budget = (playerInfo.money - (options['reserve'] || globalReserve)) * options['aug-budget'];
     // Estimate the cost of sleeves training over the next time interval to see if (ignoring income) we would drop below our reserve.
     const costByNextLoop = interval / 1000 * task.filter(t => t.startsWith("train")).length * 12000; // TODO: Training cost/sec seems to be a bug. Should be 1/5 this ($2400/sec)

@@ -13,11 +13,15 @@
 import {
     getConfiguration, instanceCount, log, getErrorInfo, getActiveSourceFiles, getNsDataThroughFile, formatTime
 } from './helpers.js'
+import { GoBoard, BLACK, selectBestMove, findSnakeEyesTarget } from './go-engine.js'
 
 const argsSchema = [
     ['cheats', true], // (Now true by default - but still an option for backwards compatibility) This is only possible if you have BN14.2
     ['disable-cheats', false], // Set to true if you want to *not* use cheats for some reason.
-    ['cheat-chance-threshold', 0.9], // Don't cheat if our success chance is less than this
+    ['cheat-chance-threshold', 0.8], // Don't cheat if our success chance is less than this
+    ['think-time', 180], // MCTS think time per move in ms (higher = stronger, still well under opponent turn delay)
+    ['max-sims', 2500], // Maximum MCTS simulations per move
+    ['legacy', false], // Fall back to the original heuristic pattern player instead of MCTS+RAVE
     ['logtime', false], // Logs time time it takes for each player to take their move
     ['runOnce', false], // Will only play one game if enabled
     ['silent', false], // (Obsolete) This script used to automatically tail. Now if you want to do this, call with --tail like normal.
@@ -33,7 +37,10 @@ export function autocomplete(data, args) {
  * @param {NS} ns */
 export async function main(ns) {
     let cheats = false;
-    let cheatChanceThreshold = 1.0;
+    let cheatChanceThreshold = 0.8;
+    let thinkTimeMs = 180;
+    let maxSims = 2500;
+    let useLegacy = false;
     let logtime = false;
     let runOnce = true;
     let silent = false;
@@ -96,6 +103,9 @@ export async function main(ns) {
 
         logtime = runOptions.logtime;
         runOnce = runOptions.runOnce;
+        thinkTimeMs = Math.max(10, Number(runOptions['think-time']) || 120);
+        maxSims = Math.max(50, Number(runOptions['max-sims']) || 2000);
+        useLegacy = Boolean(runOptions.legacy);
 
         const sourceFiles = await getActiveSourceFiles(ns, true);
         // Enable cheats if we have SF14.2 or higher (unless the user disabled cheats).
@@ -119,25 +129,10 @@ export async function main(ns) {
     }
 
     // Ram-dodging helpers (Allows the script to only require as much RAM as its most expensive function)
+    // Note: getValidMoves/getLiberties/getChains/getControlledEmptyNodes are now computed locally in go-engine.js at 0 GB RAM.
     /** @param {NS} ns @returns {Promise<string[]>} */
     async function go_getBoardState(ns) {
         return await getNsDataThroughFile(ns, `ns.go.getBoardState()`);
-    }
-    /** @param {NS} ns @returns {Promise<string[]>} */
-    async function go_analysis_getControlledEmptyNodes(ns) {
-        return await getNsDataThroughFile(ns, `ns.go.analysis.getControlledEmptyNodes()`);
-    }
-    /** @param {NS} ns @returns {Promise<boolean[][]>} */
-    async function go_analysis_getValidMoves(ns) {
-        return await getNsDataThroughFile(ns, `ns.go.analysis.getValidMoves()`);
-    }
-    /** @param {NS} ns @returns {Promise<number[][]>} */
-    async function go_analysis_getLiberties(ns) {
-        return await getNsDataThroughFile(ns, `ns.go.analysis.getLiberties()`);
-    }
-    /** @param {NS} ns @returns {Promise<number[][]>} */
-    async function go_analysis_getChains(ns) {
-        return await getNsDataThroughFile(ns, `ns.go.analysis.getChains()`);
     }
     /** @param {NS} ns @returns {Promise<number>} */
     async function go_cheat_getCheatSuccessChance(ns) {
@@ -148,7 +143,7 @@ export async function main(ns) {
     async function go_cheat_playTwoMoves(ns, x1, y1, x2, y2) {
         return await getNsDataThroughFile(ns, `await ns.go.cheat.playTwoMoves(...ns.args)`, null, [x1, y1, x2, y2]);
     }
-    /** @param {NS} ns @param {number} x1 @param {number} y1 @param {number} x2 @param {number} y2
+    /** @param {NS} ns @param {number} x @param {number} y
      * @returns {Promise<{type: "move" | "pass" | "gameOver";x: number;y: number;}>} */
     async function go_makeMove(ns, x, y) {
         return await ns.go.makeMove(x, y);
@@ -177,168 +172,208 @@ export async function main(ns) {
             }
             if (inProgress) break
         }
-        const currentGame = await ns.go.opponentNextTurn(false)
-        checkNewGame(ns, currentGame)
-        const playStyle = getStyle(ns);
+        let lastOpponentResult = await ns.go.opponentNextTurn(false)
+        checkNewGame(ns, lastOpponentResult)
+        let playStyle = getStyle(ns);
+        ns.printf("Playing as Black (X) vs %s (White / O) [%dx%d]", ns.go.getOpponent(), startBoard.length, startBoard.length);
         while (true) {
             turn++
             board = await go_getBoardState(ns);
-            contested = await go_analysis_getControlledEmptyNodes(ns);
-            validMove = await go_analysis_getValidMoves(ns);
-            validLibMoves = await go_analysis_getLiberties(ns);
-            chains = await go_analysis_getChains(ns);
+            const moveHistory = ns.go.getMoveHistory();
+            const gameState = ns.go.getGameState();
+            const localBoard = GoBoard.fromStrings(board, moveHistory);
+            const analysis = localBoard.analyze(BLACK);
+            contested = analysis.controlled;
+            validMove = analysis.validMoves;
+            validLibMoves = analysis.liberties;
+            chains = analysis.chains;
             const size = board[0].length
-            //Build a test board with walls
-            let testWall = "W".repeat(size + 2);
-            testBoard = [];
-            testBoard.push(testWall);
-            for (const b of board)
-                testBoard.push("W" + b + "W");
-            testBoard.push(testWall);
-            //We have our test board
 
             let results;
-            if (turn < 3)
-                results = await movePiece(ns, getOpeningMove(ns))
+            if (!useLegacy) {
+                // High-value SnakeEyes cheat check (2-liberty enemy chain >= 5 stones)
+                if (cheats) {
+                    const target = findSnakeEyesTarget(board, 5);
+                    if (target) {
+                        results = await moveSnakeEyes(ns, {
+                            coords: [target.x1, target.y1, target.x2, target.y2],
+                            msg: `SnakeEyes Cheat (kills ${target.killed})`
+                        });
+                    }
+                }
+                if (!results) {
+                    const oppPassed = lastOpponentResult?.type === "pass" || (turn > 1 && gameState.previousMove === null);
+                    const choice = selectBestMove(board, {
+                        moveHistory,
+                        komi: gameState.komi ?? 5.5,
+                        previousMove: gameState.previousMove,
+                        opponentPassed: oppPassed,
+                        timeBudgetMs: thinkTimeMs,
+                        maxIterations: maxSims,
+                        color: BLACK,
+                        analysis,
+                    });
+                    if (choice.type === "move") {
+                        results = await movePiece(ns, { coords: [choice.x, choice.y], msg: choice.msg });
+                    } else {
+                        ns.printf("[Black] %s", choice.msg);
+                        results = await ns.go.passTurn();
+                    }
+                }
+            } else {
+                //Build a test board with walls (used by legacy pattern matcher)
+                let testWall = "W".repeat(size + 2);
+                testBoard = [];
+                testBoard.push(testWall);
+                for (const b of board)
+                    testBoard.push("W" + b + "W");
+                testBoard.push(testWall);
 
-            if (turn >= 3) {
-                switch (playStyle) {
-                    case 0:  //Netburners
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getAggroAttack(4, 7, 3, 1, 6))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getDefAttack(8, 20, 2))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 1:  //The Black Hand
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getAggroAttack(4, 7, 3, 1, 6))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 2: //Mr. Mustacio - Slum Snakes
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getDefAttack(4, 7, 3, 1, 6))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 3: //Daedalus
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 4, 3, 1, 6))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getDefAttack(5, 7, 3, 2, 6))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 4: //Tetrads
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getAggroAttack(5, 7, 3))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat(),)) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 5: //Illum
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                    case 6: //??????
-                        if (results = await movePiece(ns, getRandomCounterLib())) break
-                        if (results = await movePiece(ns, getRandomLibAttack(88))) break
-                        if (results = await movePiece(ns, getRandomLibDefend())) break
-                        if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
-                        if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
-                        if (results = await movePiece(ns, disruptEyes())) break
-                        if (results = await movePiece(ns, getDefPattern())) break
-                        if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1))) break
-                        if (results = await movePiece(ns, getDefAttack(5, 7, 3))) break
-                        if (results = await movePiece(ns, attackGrowDragon(1))) break
-                        if (results = await movePiece(ns, getRandomExpand())) break
-                        if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
-                        if (results = await movePiece(ns, getRandomLibAttack())) break
-                        if (results = await movePiece(ns, getRandomStrat())) break
-                        ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
-                        break
-                } //End of style switch
-            } // end of turn >= 3
-            checkNewGame(ns, results)
+                if (turn < 3)
+                    results = await movePiece(ns, getOpeningMove(ns))
+
+                if (turn >= 3) {
+                    switch (playStyle) {
+                        case 0:  //Netburners
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getAggroAttack(4, 7, 3, 1, 6))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getDefAttack(8, 20, 2))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 1:  //The Black Hand
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getAggroAttack(4, 7, 3, 1, 6))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 2: //Mr. Mustacio - Slum Snakes
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 3, 3, 1, 6))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getDefAttack(4, 7, 3, 1, 6))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 3: //Daedalus
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 4, 3, 1, 6))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getDefAttack(5, 7, 3, 2, 6))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false, 1))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 4: //Tetrads
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getAggroAttack(5, 7, 3))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat(),)) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 5: //Illum
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                        case 6: //??????
+                            if (results = await movePiece(ns, getRandomCounterLib())) break
+                            if (results = await movePiece(ns, getRandomLibAttack(88))) break
+                            if (results = await movePiece(ns, getRandomLibDefend())) break
+                            if (results = await moveSnakeEyes(ns, getSnakeEyes(6))) break
+                            if (results = await movePiece(ns, getAggroAttack(2, 2, 2))) break
+                            if (results = await movePiece(ns, disruptEyes())) break
+                            if (results = await movePiece(ns, getDefPattern())) break
+                            if (results = await movePiece(ns, getAggroAttack(3, 4, 3))) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1))) break
+                            if (results = await movePiece(ns, getDefAttack(5, 7, 3))) break
+                            if (results = await movePiece(ns, attackGrowDragon(1))) break
+                            if (results = await movePiece(ns, getRandomExpand())) break
+                            if (results = await movePiece(ns, getRandomBolster(2, 1, false))) break
+                            if (results = await movePiece(ns, getRandomLibAttack())) break
+                            if (results = await movePiece(ns, getRandomStrat())) break
+                            ns.print("Turn Passed")
+                            results = await ns.go.passTurn()
+                            break
+                    } //End of style switch
+                } // end of turn >= 3
+            }
+            lastOpponentResult = results;
+            if (checkNewGame(ns, results)) {
+                playStyle = getStyle(ns);
+            }
         }
     }
 
@@ -359,13 +394,16 @@ export async function main(ns) {
      * @param {{ type:"move"|"pass"|"gameOver"; x:number; y:number;}} gameInfo
      */
     function checkNewGame(ns, gameInfo) {
-        if (gameInfo.type === "gameOver") {
+        if (gameInfo?.type === "gameOver") {
             if (runOnce) ns.exit()
             try { ns.go.resetBoardState(opponent2[Math.floor(Math.random() * opponent2.length)], 13) }
             catch { ns.go.resetBoardState(opponent[Math.floor(Math.random() * opponent.length)], 13) }
             turn = 0
             ns.clearLog()
+            ns.printf("Playing as Black (X) vs %s (White / O) [13x13]", ns.go.getOpponent());
+            return true
         }
+        return false
     }
     /** @param {NS} ns
      * @param {number} x
@@ -1077,7 +1115,7 @@ export async function main(ns) {
 
         if (x > 0 && y > 0 && board[x - 1][y - 1] === "O") surround += getChainValue(x - 1, y - 1, "O")
         if (x < size - 1 && y > 0 && board[x + 1][y - 1] === "O") surround += getChainValue(x + 1, y - 1, "O")
-        if (y < size - 1 && x > 0 && board[x - 1][y + 1] === "O") surround += getChainValue(x - 1, y - 1, "O")
+        if (y < size - 1 && x > 0 && board[x - 1][y + 1] === "O") surround += getChainValue(x - 1, y + 1, "O")
         if (y < size - 1 && x < size - 1 && board[x + 1][y + 1] === "O") surround += getChainValue(x + 1, y + 1, "O")
 
         return surround
@@ -1137,7 +1175,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
@@ -1185,7 +1223,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
@@ -1303,7 +1341,7 @@ export async function main(ns) {
         const [x, y] = attack.coords
         if (x === undefined) return false
         let mid = performance.now()
-        ns.printf("%s", attack.msg)
+        ns.printf("[Black] %s", attack.msg)
         const results = await go_makeMove(ns, x, y);
         let END = performance.now()
         if (logtime) ns.printf("Time: Me: %s  Them: %s", formatTime(ns, mid - START, true), formatTime(ns, END - mid, true))
@@ -1321,7 +1359,7 @@ export async function main(ns) {
         try {
             let mid = performance.now()
             const results = await go_cheat_playTwoMoves(ns, s1x, s1y, s2x, s2y)
-            ns.printf("%s  Chance: %.2f%%  Result: %s", attack.msg, chance * 100, results.type);
+            ns.printf("[Black] %s  Chance: %.2f%%  Result: %s", attack.msg, chance * 100, results.type);
             let END = performance.now()
             if (logtime) ns.printf("Time: Me: %s  Them: %s", formatTime(ns, mid - START, true), formatTime(ns, END - mid, true))
             START = performance.now()

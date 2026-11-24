@@ -118,7 +118,7 @@ export async function main(ns) {
         do {
             await ns.sleep(sleepInterval);
             try {
-                const reserve = options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0);
+                const reserve = options['reserve'] != null ? options['reserve'] : Number(ns.read("MachineState/CashReserve.txt") || 0);
                 player = await getPlayerInfo(ns);
                 success = await tryGetStockMarketAccess(ns, player.money - reserve);
             } catch (err) {
@@ -154,7 +154,7 @@ export async function main(ns) {
     while (true) {
         try {
             const playerStats = await getPlayerInfo(ns);
-            const reserve = options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0);
+            const reserve = options['reserve'] != null ? options['reserve'] : Number(ns.read("MachineState/CashReserve.txt") || 0);
             // Check whether we have 4s access yes (once we do, we can stop checking)
             if (pre4s) pre4s = !(await checkAccess(ns, "has4SDataTixApi"));
             const holdings = await refresh(ns, !pre4s, allStocks, myStocks); // Returns total stock value

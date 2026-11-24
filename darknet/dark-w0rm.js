@@ -14,6 +14,7 @@ import {
   RAM_WORKER,
   RESTART_WORKER,
   STASIS_WORKER,
+  STORM_SEED_FILE,
   configFile,
   readBuild,
   samePath,
@@ -169,6 +170,9 @@ const maintainLocalServer = (ns, state, host) => {
   if (openCaches(ns, state, host)) {
     return; // next pass phishing restarts with all RAM
   }
+  if (unleashStormSeedIfOrdered(ns, state, host)) {
+    return;
+  }
   if (updateStasisLink(ns, state, host)) {
     return; // RAM goes to the stasis worker
   }
@@ -268,14 +272,34 @@ const mineLocalFiles = (ns, state, host) => {
   }
   if (ns.fileExists(STORM_SEED, host) && !state.warned.has(STORM_SEED)) {
     state.warned.add(STORM_SEED);
-    toast(
-      ns,
-      "warning",
-      `DN: Storm seed: ${host}.`,
-      `${STORM_SEED} on ${host}. It deletes ~60% of the darknet and restarts the rest, so the darknet scripts never run it.`,
-      true,
-    );
+    // First sighting anywhere: record on home for visibility; coordinator decides when to unleash it.
+    if (!ns.fileExists(STORM_SEED_FILE, "home")) {
+      ns.write(STORM_SEED_FILE, `${STORM_SEED} found on ${host} at ${new Date().toISOString()}.\n`, "w");
+      if (ns.scp(STORM_SEED_FILE, "home")) {
+        toast(ns, "success", `DN: LOOT: storm seed: [${host}]`,
+          `DN loot: ${STORM_SEED} found on ${host} (recorded to ${STORM_SEED_FILE}). ` +
+          `Coordinator will unleash it once the network is saturated and looted.`, true);
+        return;
+      }
+    }
+    info(ns, `${STORM_SEED} found on ${host}. Reporting to coordinator to schedule a webstorm once saturated and looted.`);
   }
+};
+/** Unleashes STORM_SEED.exe when ordered by the coordinator. Returns true if unleashed. */
+const unleashStormSeedIfOrdered = (ns, state, host) => {
+  const plan = parseKnown(ns.peek(options["control-port"])).storm;
+  if (!plan || plan.host !== host || !ns.fileExists(STORM_SEED, host)) {
+    return false;
+  }
+  const result = ns.dnet.unleashStormSeed();
+  if (result.success) {
+    state.warned.delete(STORM_SEED);
+    ns.writePort(options["report-port"], JSON.stringify({ type: "storm", host, ok: true, message: result.message }));
+    toast(ns, "success", `DN: Webstorm: ${host}.`, `Unleashed ${STORM_SEED} on ${host}: refreshing the darknet for fresh caches and XP.`, true);
+    return true;
+  }
+  logChanged(ns, state, "storm", `WARNING: Failed to unleash ${STORM_SEED} on ${host}: ${result.message}`);
+  return false;
 };
 /**
  * Air-gap crossing: when the coordinator names this server as carrier, a worker repeatedly induces migration of the

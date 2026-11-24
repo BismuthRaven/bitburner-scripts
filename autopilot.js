@@ -1,34 +1,36 @@
 import {
-    log, getFilePath, getConfiguration, instanceCount, getNsDataThroughFile, runCommand, waitForProcessToComplete,
+    log, getFilePath, getConfiguration, instanceCount, getNsDataThroughFile, runCommand, waitForProcessToComplete_Custom,
     getActiveSourceFiles, tryGetBitNodeMultipliers, getStocksValue, unEscapeArrayArgs,
     formatMoney, formatDuration, formatNumber, getErrorInfo, tail, jsonReplacer
 } from './helpers.js'
+import { isModuleEnabled, AUTOPILOT_STATUS_FILE } from './helpers-gui.js'
 import { COORDINATOR as DARKNET_COORDINATOR, DAEMON as DARKNET_DAEMON, WORM as DARKNET_WORM, buildOf, stampBuild } from './darknet/darknet-paths.js'
 
 const argsSchema = [ // The set of all command line arguments
     ['next-bn', 0], // If we destroy the current BN, the next BN to start
-    ['disable-auto-destroy-bn', false], // Set to true if you do not want to auto destroy this BN when done
-    ['install-at-aug-count', 8], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
-    ['install-at-aug-plus-nf-count', 12], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['disable-auto-destroy-bn', true], // Set to true if you do not want to auto destroy this BN when done
+    ['install-at-aug-count', 15], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['install-at-aug-plus-nf-count', 20], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
-    ['install-countdown', 5 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
-    ['time-before-boosting-best-hack-server', 15 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
+    ['install-countdown', 10 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
+    ['aug-purchase-interval', 60 * 1000], // When buying augs without installing them ('Auto-buy augs' on, 'Auto-install augs' off), check for affordable augs this often
+    ['time-before-boosting-best-hack-server', 10 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
-    ['interval', 2000], // Wake up this often (milliseconds) to check on things
-    ['interval-check-scripts', 10000], // Get a listing of all running processes on home this frequently
-    ['high-hack-threshold', 8000], // Once hack level reaches this, we start daemon in high-performance hacking mode
+    ['interval', 2 * 1000], // Wake up this often (milliseconds) to check on things
+    ['interval-check-scripts', 5 * 1000], // Get a listing of all running processes on home this frequently
+    ['high-hack-threshold', 3000], // Once hack level reaches this, we start daemon in high-performance hacking mode
     ['enable-bladeburner', null], // (Deprecated) Bladeburner is now always enabled if it's available. Use '--disable-bladeburner' to explicitly turn off
     ['disable-bladeburner', false], // This will instruct daemon.js not to run the bladeburner.js, even if bladeburner is available.
-    ['wait-for-4s-threshold', 0.9], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
+    ['wait-for-4s-threshold', 0.8], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
     ['disable-wait-for-4s', false], // If true, will doesn't wait for the 4S Tix API to be acquired under any circumstantes
     ['disable-rush-gangs', false], // Set to true to disable focusing work-for-faction on Karma until gangs are unlocked
     ['disable-casino', false], // Set to true to disable running the casino.js script automatically
-    ['spend-hashes-on-server-hacking-threshold', 0.1], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
+    ['spend-hashes-on-server-hacking-threshold', 0.15], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
-    ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
-    ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
-    ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
+    ['xp-mode-interval-minutes', 30], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
+    ['xp-mode-duration-minutes', 1], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
+    ['no-tail-windows', true], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
 ];
 
 export function autocomplete(data, args) {
@@ -106,6 +108,7 @@ export async function main(ns) {
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
+    let lastAugPurchaseCheck = 0; // Last time we ran a buy-only purchase (rate-limits the RAM-heavy faction-manager runs)
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
     let loggedBnCompletion = false; // Flag set to ensure that if we choose to stay in the BN, we only log the "BN completed" message once per reset.
@@ -246,13 +249,15 @@ export async function main(ns) {
         let stocksValue = 0;
         try { stocksValue = await getStocksValue(ns); } catch { /* Assume if this fails (insufficient ram) we also have no stocks */ }
         manageReservedMoney(ns, player, stocksValue);
-        await checkOnDaedalusStatus(ns, player, stocksValue);
-        await checkIfBnIsComplete(ns, player);
-        await maybeAcceptStaneksGift(ns, player);
+        // Each of these is switchable from autopilot-gui.js (the switches live in CONTROL_FILE and are re-read every loop)
+        if (isModuleEnabled(ns, 'ap-daedalus')) await checkOnDaedalusStatus(ns, player, stocksValue);
+        if (isModuleEnabled(ns, 'ap-destroy-bn')) await checkIfBnIsComplete(ns, player);
+        if (isModuleEnabled(ns, 'stanek')) await maybeAcceptStaneksGift(ns, player);
         await checkOnRunningScripts(ns, player);
-        await maybeDoCasino(ns, player);
-        await maybeRunDarknet(ns);
-        await maybeInstallAugmentations(ns, player);
+        if (isModuleEnabled(ns, 'ap-casino')) await maybeDoCasino(ns, player);
+        if (isModuleEnabled(ns, 'darknet')) await maybeRunDarknet(ns);
+        if (isModuleEnabled(ns, 'ap-buy-augs') || isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player);
+        publishStatus(ns); // Update the snapshot autopilot-gui.js reads (after the status text has been set)
         return shouldWeKeepRunning(ns); // Return false to shut down autopilot.js if we installed augs, or don't have enough home RAM
     }
 
@@ -307,7 +312,7 @@ export async function main(ns) {
                     reason = "by prioritizing hack exp gains";
                 }
                 if (reservingMoneyForDaedalus) {
-                    reservingMoneyForDaedalus = false; // Turn this flag off now so we reset our reserve.txt
+                    reservingMoneyForDaedalus = false; // Turn this flag off now so we reset our MachineState/CashReserve.txt
                     reason = (reason ? reason + " and" : "by") + " saving up our money";
                 }
                 log(ns, `SUCCESS: We sped along joining the faction 'Daedalus' ${reason}. ` + // Pat ourselves on the back
@@ -347,7 +352,7 @@ export async function main(ns) {
                     `augmentations installed (scripts cannot check this without SF4).`, true, 'success');
                 return autoJoinDaedalusUnavailable = true; // We won't show this again.
             }
-            reservingMoneyForDaedalus = true; // Flag to pause all spending (set reserve.txt) until we've gotten the Daedalus invite
+            reservingMoneyForDaedalus = true; // Flag to pause all spending (set MachineState/CashReserve.txt) until we've gotten the Daedalus invite
             if (player.money < moneyReq) { // Only liquidate stocks if we don't have enough cash lying around.
                 disableStockmasterForDaedalus = true; // Flag to keep stockmaster offline until we've gotten a daedalus invite
                 log(ns, "INFO: Temporarily liquidating stocks to earn an invite to Daedalus...", true, 'info');
@@ -480,6 +485,13 @@ export async function main(ns) {
         return await getNsDataThroughFile(ns, 'ns.ps(ns.args[0])', null, ['home']);
     }
 
+    /** Wait for a PID on home without importing ns.isRunning (saves 0.10 GB static RAM)
+     * @param {NS} ns */
+    async function waitForProcessToComplete(ns, pid, verbose = false) {
+        const isAlive = async (p) => (await getRunningScripts(ns)).some(proc => proc.pid === p);
+        return await waitForProcessToComplete_Custom(ns, isAlive, pid, verbose);
+    }
+
     /** Helper to get the first instance of a running script by name.
      * @param {NS} ns
      * @param {string} baseScriptName The name of a script (before applying getFilePath)
@@ -521,14 +533,14 @@ export async function main(ns) {
         homeRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
 
         // Launch stock-master in a way that emphasizes it as our main source of income early-on
-        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32)
+        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32 && isModuleEnabled(ns, 'stockmaster'))
             launchScriptHelper(ns, 'stockmaster.js', [
                 "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
-                "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
+                "--reserve", 0, // Override to ignore the global MachineState/CashReserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
-        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
+        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js') && isModuleEnabled(ns, 'sleeve')) {
             let sleeveArgs = [];
             if (!options["disable-casino"] && !ranCasino)
                 sleeveArgs.push("--training-reserve", 300000); // Avoid training away our casino seed money
@@ -538,8 +550,12 @@ export async function main(ns) {
         }
 
         // Spend hacknet hashes on our boosting best hack-income server once established
-        let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
+        const spendHashesAll = await getNsDataThroughFile(ns,
+            `scanAllServers(ns).flatMap(h => ns.ps(h).filter(p => p.filename == ns.args[0] && p.args.includes('--spend-on-server')).map(p => ({ ...p, host: h })))`,
+            '/Temp/spend-hashes-boost-procs.txt', [getFilePath('spend-hacknet-hashes.js')]);
+        let existingSpendHashesProc = spendHashesAll[0];
         if ((9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
+            && isModuleEnabled(ns, 'spend-hashes')
             && 0 != bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain) // No point in boosting hack income if it's scaled to 0 in the current BN
         {
             const strServerIncomeInfo = ns.read('/Temp/analyze-hack.txt');	// HACK: Steal this file that Daemon also relies on
@@ -571,7 +587,7 @@ export async function main(ns) {
                         log(ns, `Identified that the best hack income server is ${bestServer} worth ${formatMoney(gain)}/sec.`);
                         const spendHashesArgs = ["--liquidate", "--spend-on-server", bestServer, "--spend-on", "Increase_Maximum_Money"];
                         if (shouldReduceMinSecurity) spendHashesArgs.push("--spend-on", "Reduce_Minimum_Security");
-                        launchScriptHelper(ns, 'spend-hacknet-hashes.js', spendHashesArgs);
+                        await launchOffloadHelper(ns, 'spend-hacknet-hashes.js', spendHashesArgs);
                     }
                 } else if (gain <= 1)
                     log_once(ns, `INFO: The best server (${bestServer})'s hack income multiplier (${formatNumber(gain)}) is currently too severely penalized ` +
@@ -600,9 +616,9 @@ export async function main(ns) {
                 // Log a special notice if we're going to be relaunching daemon.js for this reason
                 if (!existingDaemon || !(existingDaemon.args.includes("--looping-mode")))
                     daemonRelaunchMessage = `Hack level (${player.skills.hacking}) is >= ${hackThreshold} (--high-hack-threshold): Starting daemon.js in high-performance hacking mode.`;
-            } else if (player.skills.hacking >= hackThreshold) { // "tight" mode. Tighter batches to increase income rate, at the cost of more frequent misfires
-                daemonArgs = ["--cycle-timing-delay", 40, "--queue-delay", 50, "--silent-misfires",
-                    "--recovery-thread-padding", Math.min(5.0, player.skills.hacking / hackThreshold)]; // Use more recovery thread padding as our hack level increases
+            } else if (player.skills.hacking >= hackThreshold) { // "tight" mode. Tighter batches to increase income rate, tuned against Bitburner timer jitter
+                daemonArgs = ["--cycle-timing-delay", 120, "--queue-delay", 150, "--max-batches", 120, "--silent-misfires",
+                    "--recovery-thread-padding", Math.min(2.0, 1.15 + (player.skills.hacking - hackThreshold) / (hackThreshold * 10))];
             }
             else if (homeRam < 32) { // If we're in early BN 1.1 (i.e. with < 32GB home RAM), avoid squandering RAM
                 daemonArgs.push("--no-share", "--initial-max-targets", 1);
@@ -611,7 +627,7 @@ export async function main(ns) {
                 let useXpOnlyMode = prioritizeHackForDaedalus || prioritizeHackForWd ||
                     // In BNs that give no money for hacking, always start daemon.js in this mode (except BN8, because TODO: --xp-only doesn't handle stock manipulation)
                     (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8);
-                if (!useXpOnlyMode) { // Otherwise, respect the configured interval / duration
+                if (!useXpOnlyMode && isModuleEnabled(ns, 'ap-xp-mode')) { // Otherwise, respect the configured interval / duration
                     const xpInterval = Number(options['xp-mode-interval-minutes']);
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
                     const minutesInAug = getTimeInAug() / 60.0 / 1000.0;
@@ -647,7 +663,7 @@ export async function main(ns) {
 
         // Once stanek's gift is accepted, launch it once per reset before we launch daemon (Note: stanek's gift is auto-purchased by faction-manager.js on your first install)
         let stanekRunning = (13 in unlockedSFs) && findScript('stanek.js') !== undefined;
-        if ((13 in unlockedSFs) && !stanekLaunched && !stanekRunning && installedAugmentations.includes(augStanek)) {
+        if ((13 in unlockedSFs) && !stanekLaunched && !stanekRunning && installedAugmentations.includes(augStanek) && isModuleEnabled(ns, 'stanek')) {
             stanekLaunched = true; // Once we've know we've launched stanek once, we never have to again this reset.
             const stanekArgs = ["--on-completion-script", getFilePath('daemon.js')]
             if (options['no-tail-windows']) stanekArgs.push('--no-tail'); // Relay the option to suppress tail windows
@@ -661,9 +677,11 @@ export async function main(ns) {
 
         // Launch (or re-launch) daemon if it is not already running with all our desired args.
         // Hack: Ignore numeric arguments in the comparison, since we e.g. tweak --recovery-thread-padding over time
-        let launchDaemon = !existingDaemon || daemonArgs.some(arg => !existingDaemon.args.includes(arg) && !Number.isFinite(arg)) ||
+        // 'Manage daemon' off means we leave daemon.js entirely to the player (start/stop it by hand).
+        let launchDaemon = isModuleEnabled(ns, 'ap-daemon') && (!existingDaemon || daemonArgs.some(arg => !existingDaemon.args.includes(arg) && !Number.isFinite(arg)) ||
             // Special cases: We also must relaunch daemon if it is running with certain flags we wish to remove
-            (["--xp-only"].some(arg => !daemonArgs.includes(arg) && existingDaemon.args.includes(arg)))
+            (["--xp-only"].some(arg => !daemonArgs.includes(arg) && existingDaemon.args.includes(arg))))
+        wantedDaemonArgs = daemonArgs; // Report the args we would want, even when we aren't managing daemon
         if (launchDaemon) {
             if (existingDaemon) {
                 daemonRelaunchMessage ??= `Relaunching daemon.js with new arguments since the current instance doesn't include all the args we want.`;
@@ -703,13 +721,13 @@ export async function main(ns) {
 
             // Start gangs immediately (even though daemon would eventually start it) since we want any income they provide right away after an ascend
             // TODO: Consider monitoring gangs territory progress and increasing their budget / decreasing their reserve to help kick-start them
-            if (playerInGang && !findScript('gangs.js'))
+            if (playerInGang && !findScript('gangs.js') && isModuleEnabled(ns, 'gangs'))
                 launchScriptHelper(ns, 'gangs.js');
         }
 
         // Launch work-for-factions if it isn't already running (rules for maybe killing unproductive instances are above)
         // Note: We delay launching our own 'work-for-factions.js' until daemon has warmed up, so we don't steal it's "kickstartHackXp" study focus
-        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 30000) {
+        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 30000 && isModuleEnabled(ns, 'work-for-factions')) {
             // If we're trying to rush gangs, run in such a way that we will spend most of our time doing crime, reducing Karma (also okay early income)
             // NOTE: Default work-for-factions behaviour is to spend hashes on coding contracts, which suits us fine
             launchScriptHelper(ns, 'work-for-factions.js', rushGang ? rushGangsArgs : workForFactionsArgs);
@@ -852,6 +870,13 @@ export async function main(ns) {
     async function maybeInstallAugmentations(ns, player) {
         if (!(4 in unlockedSFs))  // Cannot automate augmentations or installs without singularity
             return setStatus(ns, `No singularity access, so you're on your own. You should manually work for factions and install augmentations!`);
+        // Buying and installing are separate switches in autopilot-gui.js: 'Auto-buy augs' purchases, 'Auto-install augs' resets
+        const canBuy = isModuleEnabled(ns, 'ap-buy-augs');
+        const canInstall = isModuleEnabled(ns, 'ap-install-augs');
+        if (!canBuy) { // Nothing to buy, so nothing to reserve
+            reservedPurchase = 0;
+            installCountdownResets = 0;
+        }
 
         // If we previously attempted to reserve money for an augmentation purchase order, do a fresh facman run to ensure it's still available
         if (reservedPurchase && installCountdown <= Date.now()) {
@@ -883,24 +908,25 @@ export async function main(ns) {
         const augsNeeded = Math.max(1, options['install-at-aug-count'] + sf11Level - reducedAugReq);
         const augsNeededInclNf = Math.max(1, options['install-at-aug-plus-nf-count'] + sf11Level - reducedAugReq);
 
-        // Get a count of pending augmentations (augs we plan to buy, plus any we've bought but not yet installed)
-        const pendingAugCount = facman.affordable_count_ex_nf + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
-        const pendingNfCount = facman.affordable_count_nf + facman.awaiting_install_count_nf; // Only neuroflux levels
+        // Get a count of pending augmentations (augs we plan to buy, plus any we've bought but not yet installed).
+        // When buying is off, only the ones already bought count - we won't be adding to them.
+        const pendingAugCount = (canBuy ? facman.affordable_count_ex_nf : 0) + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
+        const pendingNfCount = (canBuy ? facman.affordable_count_nf : 0) + facman.awaiting_install_count_nf; // Only neuroflux levels
         const pendingAugInclNfCount = pendingAugCount + pendingNfCount; // Includes neuroflux levels
         // Create a list of augmentations pending install or pending puchase to display. Group all nf augs into one.
         const strNF = "NeuroFlux Governor"
         let augsToInstall = facman.awaiting_install_augs.filter(aug => aug != strNF)
-            .concat(...facman.affordable_augs.filter(aug => aug != strNF));
+            .concat(...(canBuy ? facman.affordable_augs.filter(aug => aug != strNF) : []));
         if (pendingNfCount > 0)
             augsToInstall.push(`${strNF} (x${pendingNfCount})`)
 
         // Determine whether we can afford enough augmentations to merit a reset
-        let totalCost = facman.total_rep_cost + facman.total_aug_cost;
+        let totalCost = canBuy ? facman.total_rep_cost + facman.total_aug_cost : 0;
         const augSummary = `${pendingAugCount} of ${facman.unpurchased_count - 1} remaining augmentations` + // Unowned - 1 because we can always buy more Neuroflux
             (pendingNfCount > 0 ? ` + ${pendingNfCount} levels of NeuroFlux.` : '.') +
             (pendingAugCount > 0 ? `\n    Augs: [\"${augsToInstall.join("\", \"")}\"]` : '');
-        let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${augSummary}`
-        let shouldReset = options['install-for-augs'].some(a => facman.affordable_augs.includes(a)) ||
+        let resetStatus = canBuy ? `Reserving ${formatMoney(totalCost)} to install ${augSummary}` : `Ready to install ${augSummary}`
+        let shouldReset = (canBuy && options['install-for-augs'].some(a => facman.affordable_augs.includes(a))) ||
             pendingAugCount >= augsNeeded || pendingAugInclNfCount >= augsNeededInclNf;
 
         // If we are in Daedalus, and we do not yet have enough favour to unlock rep donations with Daedalus,
@@ -913,7 +939,7 @@ export async function main(ns) {
         ) {
             shouldReset = true;
             resetStatus = `We have enough reputation with Daedalus to unlock donations on our next reset.\n${resetStatus}`;
-            if (totalCost == 0) totalCost = 1; // Hack, logic below expects some non-zero reserve in preparation for ascending.
+            if (canBuy && totalCost == 0) totalCost = 1; // Hack, logic below expects some non-zero reserve in preparation for ascending.
         }
 
         // Heuristic: if we can afford 4 or more augs in the first ~20 minutes, it's usually worth doing a "quick install"
@@ -934,17 +960,23 @@ export async function main(ns) {
         // If not ready to reset, set a status with our progress and return
         if (!shouldReset) {
             setStatus(ns, `Currently at ${formatDuration(getTimeInAug())} since last aug. ` +
-                `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` +
+                (canBuy ? `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` :
+                    `Waiting for ${augsNeeded} augs (or ${augsNeededInclNf} including NeuroFlux levels) to be bought before installing.`) +
                 `\nCan currently get: ${augSummary}` + (pendingAugCount == 0 ? '' : `\n  Total Cost: ${formatMoney(totalCost)}`) +
                 ` (\`run faction-manager.js\` for details)`, augSummary);
             return reservedPurchase = 0; // If we were previously reserving money for a purchase, reset that flag now
         }
+        // Buy-only mode ('Auto-install augs' off): purchase the batch autopilot would have installed, then stop short of resetting
+        if (!canInstall) return await buyAffordableAugs(ns, facman, augSummary);
         // If we want to reset, but there is a reason to delay, don't reset
         if (await shouldDelayInstall(ns, player, facman)) // If we're currently in a state where we should not be resetting, skip reset logic
             return reservedPurchase = 0;
 
+        // Install-only mode has nothing to buy, but still give the usual heads-up before the reset
+        if (!canBuy && installCountdown == 0) installCountdown = Date.now() + options['install-countdown'];
+
         // Ensure the money needed for the above augs doesn't get ripped out from under us by reserving it
-        if (reservedPurchase < totalCost) {
+        if (canBuy && reservedPurchase < totalCost) {
             // A countdown is displayed to give the user a heads up, and give us time to potentially earn money for more augmentations
             if (reservedPurchase == 0)
                 installCountdown = Date.now() + options['install-countdown'];
@@ -966,7 +998,7 @@ export async function main(ns) {
                 }
                 log(ns, purchaseChangeLog, true);
             }
-            ns.write("reserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
+            ns.write("MachineState/CashReserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
         }
         // We must wait until the configured cooldown elapses before we install augs.
         if (installCountdown > Date.now()) {
@@ -984,6 +1016,10 @@ export async function main(ns) {
         // Kick off ascend.js
         let errLog;
         const ascendArgs = ['--install-augmentations', true, '--on-reset-script', ns.getScriptName()]
+        if (!canBuy)
+            ascendArgs.push('--no-purchase');
+        if (!isModuleEnabled(ns, 'stanek'))
+            ascendArgs.push('--skip-staneks-gift');
         if (pendingAugInclNfCount == 0) // If we know we would install 0 augs, but still wish to reset, we must enable soft resetting
             ascendArgs.push("--allow-soft-reset")
         let pid = launchScriptHelper(ns, 'ascend.js', ascendArgs);
@@ -995,6 +1031,50 @@ export async function main(ns) {
             errLog = `ERROR: Failed to launch ascend.js (pid == 0). Will try again later`;
         // If we got this far, something went wrong
         persist_log(ns, log(ns, errLog, true, 'error'));
+    }
+
+    /** Buy-only mode ('Auto-buy augs' on, 'Auto-install augs' off): purchase the affordable batch via faction-manager.js without resetting.
+     * @param {NS} ns */
+    async function buyAffordableAugs(ns, facman, augSummary) {
+        installCountdown = 0;
+        installCountdownResets = 0;
+        if (facman.affordable_count <= 0) {
+            setStatus(ns, `Ready to install ${augSummary}\n  'Auto-install augs' is off - run ascend.js or switch it on when ready to reset.`, augSummary);
+            return reservedPurchase = 0;
+        }
+        if (Date.now() - lastAugPurchaseCheck < options['aug-purchase-interval']) {
+            setStatus(ns, `Waiting to purchase ${facman.affordable_count} affordable augs (${augSummary})`, augSummary);
+            return reservedPurchase = facman.total_rep_cost + facman.total_aug_cost;
+        }
+        lastAugPurchaseCheck = Date.now();
+        // Accept Stanek's gift before our first augmentation purchase (outside BN8) unless Stanek is switched off
+        const facmanArgs = ['--purchase', '--verbose', 'false'];
+        if (13 in unlockedSFs) {
+            if (resetInfo.currentNode == 8 || !isModuleEnabled(ns, 'stanek'))
+                facmanArgs.push('--ignore-stanek');
+            else if (!acceptedStanek && !installedAugmentations.includes(augStanek) && facman.purchased_count <= 1) {
+                if (await getNsDataThroughFile(ns, 'ns.stanek.acceptGift()')) {
+                    log(ns, `SUCCESS: Accepted Stanek's Gift before purchasing augmentations!`, true, 'success');
+                    installedAugmentations.push(augStanek);
+                    acceptedStanek = true;
+                } else facmanArgs.push('--ignore-stanek');
+            }
+        }
+        // faction-manager.js refuses --purchase while holding stocks; liquidate first if needed (checkOnRunningScripts relaunches stockmaster)
+        if ((await getStocksValue(ns)) > 0) {
+            log(ns, `INFO: Liquidating stocks to purchase ${facman.affordable_count} augmentations...`, true, 'info');
+            const liqPid = launchScriptHelper(ns, 'stockmaster.js', ['--liquidate']);
+            if (liqPid) await waitForProcessToComplete(ns, liqPid, true);
+        }
+        ns.write("MachineState/CashReserve.txt", 0, "w");
+        log(ns, `INFO: Purchasing ${facman.affordable_count} augmentations ('Auto-install augs' is off, not resetting): ${augSummary}`, true, 'info');
+        const pid = launchScriptHelper(ns, 'faction-manager.js', facmanArgs);
+        if (pid) {
+            await waitForProcessToComplete(ns, pid, true);
+            const refreshPid = launchScriptHelper(ns, 'faction-manager.js', ['--verbose', 'false']);
+            if (refreshPid) await waitForProcessToComplete(ns, refreshPid, true);
+        }
+        return reservedPurchase = 0;
     }
 
     /** Logic to detect if we are close to a milestone and should postpone installing augmentations until it is hit
@@ -1091,9 +1171,10 @@ export async function main(ns) {
      * @param {Player} player */
     function manageReservedMoney(ns, player, stocksValue) {
         if (reservedPurchase) return; // Do not mess with money reserved for installing augmentations
-        const currentReserve = Number(ns.read("reserve.txt") || 0);
+        if (!isModuleEnabled(ns, 'ap-reserve')) return; // Switched off in autopilot-gui.js: MachineState/CashReserve.txt belongs to the player
+        const currentReserve = Number(ns.read("MachineState/CashReserve.txt") || 0);
         if (reservingMoneyForDaedalus) // Reserve 100b to get the daedalus invite
-            return currentReserve == 100E9 ? true : ns.write("reserve.txt", 100E9, "w");
+            return currentReserve == 100E9 ? true : ns.write("MachineState/CashReserve.txt", 100E9, "w");
         // Otherwise, reserve money for stocks for a while, as it's our main source of income early in the BN
         // It also acts as a decent way to save up for augmentations
         const minStockValue = 8E9; // At a minimum 8 of the 10 billion earned from the casino must be reserved for buying stock
@@ -1102,7 +1183,7 @@ export async function main(ns) {
         const reserveCap = 1E12; // As we start start to earn crazy money, we will hit the stock market cap, so cap the maximum reserve
         // Dynamically update reserved cash based on how much money is already converted to stocks.
         const reserve = Math.min(reserveCap, Math.max(0, player.money * minStockPercent, minStockValue - stocksValue));
-        return currentReserve == reserve ? true : ns.write("reserve.txt", reserve, "w"); // Reserve for stocks
+        return currentReserve == reserve ? true : ns.write("MachineState/CashReserve.txt", reserve, "w"); // Reserve for stocks
         // NOTE: After several iterations, I decided that the above is actually best to keep in all scenarios:
         // - Casino.js ignores the reserve, so the above takes care of ensuring our casino seed money isn't spent
         // - In low-income situations, stockmaster will be our best source of income. We invoke it such that it ignores
@@ -1110,11 +1191,11 @@ export async function main(ns) {
         // - Once high-hack/gang income is achieved, this 8B will not be missed anyway.
         /*
         if(!ranCasino) {
-            ns.write("reserve.txt", 300000, "w"); // Prevent other scripts from spending our casino seed money
+            ns.write("MachineState/CashReserve.txt", 300000, "w"); // Prevent other scripts from spending our casino seed money
             return moneyReserved = true;
         }
         // Otherwise, clear any reserve we previously had
-        if(moneyReserved) ns.write("reserve.txt", 0, "w"); // Remove the casino reserve we would have placed
+        if(moneyReserved) ns.write("MachineState/CashReserve.txt", 0, "w"); // Remove the casino reserve we would have placed
         return moneyReserved = false;
         */
     }
@@ -1135,7 +1216,7 @@ export async function main(ns) {
                 `\n  purchase some home RAM (which you must do manually at a store like [alpha ent.] in the city),` +
                 `\n\n  Once you have more home ram, feel free to 'run ${ns.getScriptName()}' again!` +
                 `\n\n` + '-'.repeat(100), true);
-            return false; // Daemon.js needs more room to breath
+            return false; // daemon.js needs more room to breath
         }
         // Otherwise, keep running
         return true;
@@ -1154,10 +1235,40 @@ export async function main(ns) {
         else
             log(ns, `ERROR: Failed to launch ${baseScriptName} with args: [${args.join(", ")}]` +
                 (err ? `\nCaught: ${getErrorInfo(err)}` : ''), true, 'error');
+        recentLaunches = [{ time: Date.now(), script: baseScriptName, args, pid }, ...recentLaunches].slice(0, 15);
         return pid;
     }
 
+    /** Launch a self-contained script on a rooted non-home server with spare RAM (falls back to home) via /Tasks/launch-offload.js
+     * @param {NS} ns */
+    async function launchOffloadHelper(ns, baseScriptName, args = []) {
+        const scriptPath = getFilePath(baseScriptName);
+        const pid = launchScriptHelper(ns, '/Tasks/launch-offload.js', [scriptPath, ...args]);
+        if (pid) await waitForProcessToComplete(ns, pid);
+        try {
+            const res = JSON.parse(ns.read('/Temp/launch-offload.txt') || '{}');
+            if (res.pid) {
+                log(ns, `INFO: Offloaded ${baseScriptName} onto ${res.host} (pid: ${res.pid})`, true);
+                return res.pid;
+            }
+        } catch { /* fall through to home launch */ }
+        return launchScriptHelper(ns, baseScriptName, args);
+    }
+
     let lastStatusLog = ""; // The current or last-assigned long-term status (what this script is waiting to happen)
+    let wantedDaemonArgs = []; // The daemon args we last decided on (shown in autopilot-gui.js)
+    let recentLaunches = []; // Scripts we launched, newest first (shown in autopilot-gui.js)
+
+    /** Snapshot of autopilot's state and launch history for autopilot-gui.js (0 GB file write)
+     * @param {NS} ns */
+    function publishStatus(ns) {
+        ns.write(AUTOPILOT_STATUS_FILE, JSON.stringify({
+            time: Date.now(), pid: ns.pid, status: lastStatusLog,
+            installAt: installCountdown || 0, reservedPurchase, nextBn,
+            wantedDaemonArgs, recentLaunches,
+            flags: Object.fromEntries(Object.entries(options ?? {}).filter(([k]) => k != "_" && options[k] === true)),
+        }), "w");
+    }
 
     /** Helper to set a global status and print it if it changes
      * @param {NS} ns */

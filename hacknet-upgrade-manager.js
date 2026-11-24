@@ -9,7 +9,7 @@ const argsSchema = [
     ['interval', 1000], // Rate at which the program purchases upgrades when running continuously
     ['max-spend', Number.MAX_VALUE], // The maximum amount of money to spend on upgrades
     ['toast', false], // Set to true to toast purchases
-    ['reserve', null], // Reserve this much cash (defaults to contents of reserve.txt if not specified)
+    ['reserve', null], // Reserve this much cash (defaults to contents of MachineState/CashReserve.txt if not specified)
 
 ];
 
@@ -136,7 +136,7 @@ export function upgradeHacknet(ns, maxSpend, maxPayoffTimeSeconds = 3600 /* 3600
         setStatus(ns, `The next best purchase would be ${strPurchase}, but the ${strPayoff} is worse than the limit (${formatDuration(1000 * maxPayoffTimeSeconds)})`);
         return false; // Shut-down. As long as maxPayoffTimeSeconds doesn't change, we will never purchase another upgrade
     }
-    const reserve = (options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0));
+    const reserve = (options['reserve'] != null ? options['reserve'] : Number(ns.read("MachineState/CashReserve.txt") || 0));
     const playerMoney = ns.getPlayer().money;
     if (cost > playerMoney - reserve) {
         setStatus(ns, `The next best purchase would be ${strPurchase}, but the cost exceeds the our ` +

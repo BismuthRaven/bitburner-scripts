@@ -12,10 +12,10 @@ export const CRAWLER_SCHEMA = [
   ["event-port", 7463], // coordinator -> daemon tail on home: coordinator actions
   ["state-file", "/data/darknet-state.json"], // coordinator's saved passwords and nodes
   ["max-known-passwords", 300], // passwords handed to each new instance
-  ["hack-loop-wait-ms", 4000], // pause between passes over all neighbours
+  ["hack-loop-wait-ms", 1500], // pause between passes over all neighbours
   ["report-ms", 30000], // neighbour report interval
-  ["batch", 12], // guesses per heartbleed read
-  ["lab-steps-per-pass", 40], // labyrinth moves per pass
+  ["batch", 24], // guesses per heartbleed read (safe well under MAX_LOGS=200)
+  ["lab-steps-per-pass", 60], // labyrinth moves per pass
   ["retry-cannot-ms", 31000], // retry delay: server cannot be solved yet (e.g. low charisma)
   ["retry-unsolved-ms", 32000], // retry delay: solver ran out of ideas
   ["retry-unknown-model-ms", 33000], // retry delay: unknown model id
@@ -39,11 +39,34 @@ export const newState = (known) => ({
   build: 0, // build of the scripts this instance runs
 });
 
+/** Models that require zero heartbleed calls (0-HB or tiny dictionary) — cracked first for fast spread. */
+const INSTANT_MODELS = new Set([
+  "ZeroLogon", "DeskMemo_3.1", "CloudBlare(tm)", "FreshInstall_1.0", "Pr0verFl0",
+  "PrimeTime 2", "Laika4", "110100100", "OctantVoxel", "MathML", "OrdoXenos",
+]);
+
+/** Priority score for neighbour ordering (lower = visit first): rooted/known -> instant models -> easier/faster -> harder. */
+const neighbourPriority = (ns, state, hostname) => {
+  try {
+    if (runningCrawler(ns, hostname)) return 0; // cheap build check / skip
+    if (state.known[hostname] !== undefined) return 1;
+    const d = ns.dnet.getServerDetails(hostname);
+    if (!d.isOnline || !d.isConnectedToCurrentServer) return 1000;
+    if (d.hasSession) return 2;
+    if (LAB_NAMES.includes(hostname)) return 3;
+    if (INSTANT_MODELS.has(d.modelId)) return 10 + d.difficulty;
+    return 100 + d.requiredCharismaSkill + d.difficulty * 5;
+  } catch {
+    return 1000;
+  }
+};
+
 /** Visits each neighbour (crack, spread or update), then reports. afterEach runs between neighbours. */
 export const crawlNeighbours = async (ns, state, host, afterEach = () => {}) => {
   const neighbours = ns.dnet.probe();
   logChanged(ns, state, "neighbours", `INFO: Neighbours of ${host} (${neighbours.length}): ${neighbours.join(", ") || "none"}`);
-  for (const neighbour of neighbours) {
+  const ordered = [...neighbours].sort((a, b) => neighbourPriority(ns, state, a) - neighbourPriority(ns, state, b));
+  for (const neighbour of ordered) {
     try {
       await visitNeighbour(ns, state, neighbour);
     } catch (error) {
@@ -155,6 +178,8 @@ export const report = (ns, state, host, neighbours) => {
     stationary: details?.isStationary ?? true,
     maxRam: ns.getServerMaxRam(host),
     blockedRam: details?.blockedRam ?? 0,
+    caches: host === "home" ? 0 : ns.ls(host, ".cache").filter((name) => name.endsWith(".cache")).length,
+    stormSeed: host !== "home" && ns.fileExists("STORM_SEED.exe", host),
     contracts: ns.ls(host, ".cct"),
   };
   ns.writePort(options["report-port"], JSON.stringify(node));
@@ -393,13 +418,17 @@ export class Target {
   /** Guesses all passwords, returns the parsed feedback entry for each (one heartbleed). */
   async probe(passwords) {
     if (!this.canReadLogs) {
-      // Fail early when charisma is too low to read logs
-      const result = await this.ns.dnet.heartbleed(this.host, { peek: true });
-      if (result.code === 503 || result.code === 351) {
-        throw new Gone();
-      }
-      if (!result.success) {
-        throw new Cannot(`cannot read logs: ${result.message}`);
+      // Heartbleed fails in 100ms on low charisma (451), but costs 1.5*T_auth on success.
+      // For small batches (<= 4 guesses), skipping the preflight and letting capture() check is strictly faster.
+      // For larger batches, test 1 guess first only if needed — or just preflight when >= 6 guesses.
+      if (passwords.length >= 6) {
+        const result = await this.ns.dnet.heartbleed(this.host, { peek: true });
+        if (result.code === 503 || result.code === 351) {
+          throw new Gone();
+        }
+        if (!result.success) {
+          throw new Cannot(`cannot read logs: ${result.message}`);
+        }
       }
       this.canReadLogs = true;
     }
@@ -499,20 +528,30 @@ export const solveByExactCounts = async (t, exactCounts) => {
   const length = t.length;
   const counts = new Map();
   let total = 0;
-  for (const symbols of chunks([...t.alphabet], options.batch)) {
-    if (total >= length) {
+  const alpha = [...t.alphabet];
+  for (let i = 0; i < alpha.length && total < length; i += options.batch) {
+    if (alpha.length - i === 1) {
+      counts.set(alpha[i], length - total);
+      total = length;
       break;
     }
-    const results = await exactCounts(symbols.map((symbol) => symbol.repeat(length)));
-    symbols.forEach((symbol, i) => {
-      counts.set(symbol, results[i]);
-      total += results[i];
+    // Never probe the last symbol: its count is deduced from (length - total)
+    const slice = alpha.slice(i, Math.min(i + options.batch, alpha.length - 1));
+    const results = await exactCounts(slice.map((symbol) => symbol.repeat(length)));
+    slice.forEach((symbol, idx) => {
+      counts.set(symbol, results[idx]);
+      total += results[idx];
     });
+    if (i + slice.length === alpha.length - 1 && total < length) {
+      counts.set(alpha[alpha.length - 1], length - total);
+      total = length;
+      break;
+    }
   }
   if (total !== length) {
     throw new Cannot("symbol counts do not add up");
   }
-  const filler = [...t.alphabet].find((symbol) => !counts.get(symbol));
+  const filler = alpha.find((symbol) => !counts.get(symbol));
   if (filler === undefined) {
     throw new Cannot("every symbol is used, no spare filler");
   }
@@ -523,22 +562,34 @@ export const solveByExactCounts = async (t, exactCounts) => {
   let tasks = present.map(([symbol, n]) => ({ symbol, cells: [...Array(length).keys()], n }));
 
   while (tasks.length > 0) {
-    const open = [];
-    for (const task of tasks) {
-      if (task.n === task.cells.length) {
-        task.cells.forEach((cell) => (password[cell] = task.symbol));
-      } else {
-        open.push(task);
+    // Prune cells already claimed by other symbols; cascade any newly forced placements
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const open = [];
+      for (const task of tasks) {
+        const avail = task.cells.filter((cell) => password[cell] === null);
+        if (task.n === 0) continue;
+        if (task.n === avail.length) {
+          avail.forEach((cell) => (password[cell] = task.symbol));
+          changed = true;
+        } else {
+          open.push({ symbol: task.symbol, cells: avail, n: task.n });
+        }
       }
+      tasks = open;
     }
-    const halves = open.map((task) => task.cells.slice(0, Math.ceil(task.cells.length / 2)));
-    const guesses = open.map((task, i) => {
+    if (tasks.length === 0) {
+      break;
+    }
+    const halves = tasks.map((task) => task.cells.slice(0, Math.ceil(task.cells.length / 2)));
+    const guesses = tasks.map((task, i) => {
       const guess = Array(length).fill(filler);
       halves[i].forEach((cell) => (guess[cell] = task.symbol));
       return guess.join("");
     });
-    const results = guesses.length > 0 ? await exactCounts(guesses) : [];
-    tasks = open.flatMap((task, i) => {
+    const results = await exactCounts(guesses);
+    tasks = tasks.flatMap((task, i) => {
       const rest = task.cells.filter((cell) => !halves[i].includes(cell));
       return [
         { symbol: task.symbol, cells: halves[i], n: results[i] },
@@ -551,25 +602,27 @@ export const solveByExactCounts = async (t, exactCounts) => {
 };
 /** The log gives the first wrong position, so the password resolves one character at a time. */
 export const solveTimingAttack = async (t) => {
+  const alpha = [...t.alphabet];
+  // Minimizes (N/2 + B/2) + 1.5*(N/(2B) + 0.5): B_opt = sqrt(1.5 * N) (~4 for digits, ~10 for alphanumeric)
+  const stepBatch = Math.max(2, Math.min(options.batch, Math.round(Math.sqrt(1.5 * alpha.length))));
   let prefix = "";
-  for (let position = 0; position < t.length; position++) {
+  for (let position = 0; position < t.length - 1; position++) {
     let next = null;
-    for (const symbols of chunks([...t.alphabet], options.batch)) {
-      const results = await t.probe(symbols.map((symbol) => prefix + symbol)); // the last position ends in Solved
+    for (let i = 0; i < alpha.length - 1; i += stepBatch) {
+      const symbols = alpha.slice(i, Math.min(i + stepBatch, alpha.length - 1));
+      const results = await t.probe(symbols.map((symbol) => prefix + symbol));
       const hit = results.findIndex((r) => Number(/\((\d+)\)/.exec(r.message)?.[1] ?? -1) > position);
       if (hit >= 0) {
         next = symbols[hit];
         break;
       }
     }
-    if (next === null) {
-      throw new Cannot("timing attack found no matching symbol");
-    }
-    prefix += next;
+    prefix += next ?? alpha[alpha.length - 1];
   }
-  await t.tryAll([prefix]);
+  // Last character: authenticate() throws Solved immediately without needing heartbleed
+  await t.tryAll(alpha.map((symbol) => prefix + symbol));
 };
-/** Binary search on too-high/too-low feedback; resumes after a retry. */
+/** Ternary search on too-high/too-low feedback (2 guesses per heartbleed minimizes (k+1.5)/ln(k+1)); resumes after a retry. */
 export const searchByFeedback = async (t, low, high, isTooHigh, isTooLow) => {
   const range = `${low}-${high}`;
   const saved = t.progress.get(t.host);
@@ -579,16 +632,25 @@ export const searchByFeedback = async (t, low, high, isTooHigh, isTooLow) => {
   }
   while (low <= high) {
     t.progress.set(t.host, { range, low, high });
-    const middle = Math.floor((low + high) / 2);
-    const [entry] = await t.probe([String(middle)]);
-    if (isTooHigh(entry.data)) {
-      high = middle - 1;
-    } else if (isTooLow(entry.data)) {
-      low = middle + 1;
-    } else {
-      throw new Cannot(`unexpected feedback "${entry.data}"`);
+    const span = high - low + 1;
+    if (span <= 2) {
+      await t.tryAll(span === 1 ? [String(low)] : [String(low), String(high)]);
+      break;
     }
-    detail(t.ns, `${t.host}: ${middle} is ${entry.data}, now searching ${low}-${high}.`);
+    const m1 = low + Math.floor(span / 3);
+    const m2 = low + Math.floor((2 * span) / 3);
+    const [e1, e2] = await t.probe([String(m1), String(m2)]);
+    if (isTooHigh(e1.data)) {
+      high = m1 - 1;
+    } else if (isTooLow(e2.data)) {
+      low = m2 + 1;
+    } else if (isTooLow(e1.data) && isTooHigh(e2.data)) {
+      low = m1 + 1;
+      high = m2 - 1;
+    } else {
+      throw new Cannot(`unexpected feedback "${e1.data}" / "${e2.data}"`);
+    }
+    detail(t.ns, `${t.host}: ${m1}=${e1.data}, ${m2}=${e2.data}, now searching ${low}-${high}.`);
   }
   t.progress.delete(t.host); // contradictory feedback (e.g. password changed): restart next time
 };
@@ -613,12 +675,14 @@ export const solveGuessNumber = (t) => {
 /** "ccc..c" returns yes/yesn't per position, revealing all positions of that symbol. */
 export const solveYesnt = async (t) => {
   const password = Array(t.length).fill(null);
-  for (const symbols of chunks([...t.alphabet], options.batch)) {
+  const alpha = [...t.alphabet];
+  for (let i = 0; i < alpha.length - 1; i += options.batch) {
+    const symbols = alpha.slice(i, Math.min(i + options.batch, alpha.length - 1));
     const results = await t.probe(symbols.map((symbol) => symbol.repeat(t.length)));
-    results.forEach((entry, i) =>
+    results.forEach((entry, idx) =>
       entry.data.split(",").forEach((answer, position) => {
         if (answer === "yes" && password[position] === null) {
-          password[position] = symbols[i];
+          password[position] = symbols[idx];
         }
       }),
     );
@@ -626,7 +690,8 @@ export const solveYesnt = async (t) => {
       break;
     }
   }
-  await t.tryAll([password.map((symbol) => symbol ?? "0").join("")]);
+  const lastSymbol = alpha[alpha.length - 1];
+  await t.tryAll([password.map((symbol) => symbol ?? lastSymbol).join("")]);
 };
 /** The log says whether the attempt divides the password, a product of known primes. */
 export const solveDivisibility = async (t) => {
@@ -634,16 +699,25 @@ export const solveDivisibility = async (t) => {
   let password = 1n; // BigInt: high difficulty exceeds 2^53
   const factorise = async (primes) => {
     const flags = await divides(primes);
-    let found = 0;
-    for (const prime of primes.filter((_, i) => flags[i])) {
-      let power = prime;
-      password *= BigInt(prime);
-      found++;
-      while (power * prime <= Number.MAX_SAFE_INTEGER && (await divides([power * prime]))[0]) {
-        power *= prime;
-        password *= BigInt(prime);
-        found++;
-      }
+    let active = primes.filter((_, i) => flags[i]).map((prime) => ({ prime, power: prime }));
+    let found = active.length;
+    for (const item of active) {
+      password *= BigInt(item.prime);
+    }
+    // Batch all prime-power checks together per round instead of one heartbleed per prime
+    while (active.length > 0) {
+      const nextTests = active.filter((item) => item.power * item.prime <= Number.MAX_SAFE_INTEGER);
+      if (nextTests.length === 0) break;
+      const results = await divides(nextTests.map((item) => item.power * item.prime));
+      active = [];
+      nextTests.forEach((item, i) => {
+        if (results[i]) {
+          item.power *= item.prime;
+          password *= BigInt(item.prime);
+          found++;
+          active.push(item);
+        }
+      });
     }
     return found;
   };
@@ -676,7 +750,7 @@ export const solveTripleModulo = async (t) => {
   });
   await t.tryAll([value.toString()]);
 };
-/** Altitude is 10000 * exp(-((x - password) / width)^2) plus side hills: scan a grid, then invert the formula to jump to the peak candidates. */
+/** Altitude is 10000 * exp(-((x - password) / width)^2) plus side hills: scan a coarse grid, then invert the formula on top peaks. */
 export const solveKingOfTheHill = async (t) => {
   const length = t.length;
   if (length === 1) {
@@ -685,38 +759,58 @@ export const solveKingOfTheHill = async (t) => {
   const low = 10 ** (length - 1);
   const high = 10 ** length - 1;
   const width = 10 ** Math.max(length - 2, 0) + 1;
+  const step = Math.max(1, Math.floor(width * 1.6));
   const altitudes = async (xs) => (await t.probeAll(xs.map(String))).map((entry) => Number(entry.data));
-  const highest = (values) => values.indexOf(Math.max(...values));
 
   const grid = [];
-  for (let x = low; x < high; x += width) {
+  for (let x = low; x < high; x += step) {
     grid.push(x);
   }
-  grid.push(high); // every password lies within half a hill width of a sample
-  let readings = await altitudes(grid);
-  let best = highest(readings);
-  let x = grid[best];
-  let altitude = readings[best];
-  for (let round = 0; round < 12; round++) {
-    const distance = width * Math.sqrt(Math.max(Math.log(10000 / Math.max(altitude, 1e-300)), 0));
-    const candidates = [...new Set([Math.round(x - distance), Math.round(x + distance)])].filter(
-      (candidate) => candidate >= low && candidate <= high,
-    );
-    if (candidates.length === 0) {
-      return;
+  grid.push(high);
+  const readings = await altitudes(grid);
+  const peaks = grid.map((x, i) => ({ x, altitude: readings[i] })).sort((a, b) => b.altitude - a.altitude).slice(0, 3);
+  for (const peak of peaks) {
+    let { x, altitude } = peak;
+    for (let round = 0; round < 6; round++) {
+      const distance = width * Math.sqrt(Math.max(Math.log(10000 / Math.max(altitude, 1e-300)), 0));
+      const candidates = [...new Set([Math.round(x - distance), Math.round(x + distance)])].filter(
+        (candidate) => candidate >= low && candidate <= high,
+      );
+      if (candidates.length === 0) {
+        break;
+      }
+      const next = await altitudes(candidates);
+      const best = next.indexOf(Math.max(...next));
+      if (next[best] <= altitude) {
+        break;
+      }
+      x = candidates[best];
+      altitude = next[best];
     }
-    readings = await altitudes(candidates);
-    best = highest(readings);
-    x = candidates[best];
-    altitude = readings[best];
   }
 };
-/** Each failed attempt returns a packet containing the password; the substring common to all captures is the password. */
+/** Each failed attempt returns a packet containing the password; diff<=16 includes "host:pw" on the first packet, else intersect 2+ captures. */
 export const solveSniffer = async (t) => {
   const length = t.length;
   const isValid = (text) => [...text].every((symbol) => t.alphabet.includes(symbol));
+  if (t.difficulty <= 16) {
+    const [entry] = await t.probe([`${"x".repeat(length)}0`]);
+    const cands = [];
+    for (const line of t.noise) {
+      const leaked = /^Logging in with passcode: (.*) \.\.\.$/.exec(line);
+      if (leaked && leaked[1].length === length && isValid(leaked[1])) cands.push(leaked[1]);
+    }
+    const marker = `${t.host}:`;
+    for (let at = entry.data.indexOf(marker); at >= 0; at = entry.data.indexOf(marker, at + 1)) {
+      const pw = entry.data.slice(at + marker.length, at + marker.length + length);
+      if (pw.length === length && isValid(pw)) cands.push(pw);
+    }
+    if (cands.length > 0) {
+      await t.tryAll([...new Set(cands)]);
+    }
+  }
   for (let round = 0; round < 3; round++) {
-    const decoys = [0, 1, 2].map((i) => `${"x".repeat(length)}${round}${i}`);
+    const decoys = (round === 0 ? [0, 1] : [0, 1, 2]).map((i) => `${"x".repeat(length)}${round}${i}`);
     const packets = (await t.probe(decoys)).map((entry) => entry.data);
     const scores = new Map();
     const add = (text, weight) => {
@@ -749,6 +843,18 @@ export const solveSniffer = async (t) => {
 // Labyrinth: move with authenticate(lab, direction), map with labreport(). Moves span two cells; positions are per pid, so progress stays in memory.
 // ---------------------------------------------------------------------------------------------------------------
 
+/** Parses the 3x3 surroundings grid returned in authenticate(lab, dir).data. */
+export const parseLabSurroundings = (data) => {
+  const rows = String(data ?? "").split("\n");
+  if (rows.length < 3) return null;
+  return {
+    north: rows[0]?.[1] === " ",
+    east: rows[1]?.[2] === " ",
+    south: rows[2]?.[1] === " ",
+    west: rows[1]?.[0] === " ",
+  };
+};
+
 /** Walks the maze depth first for a bounded number of steps. Returns true at the exit. */
 export const stepLabyrinth = async (ns, state, hostname) => {
   if (!state.labs.has(hostname)) {
@@ -764,7 +870,7 @@ export const stepLabyrinth = async (ns, state, hostname) => {
     }
     return result;
   };
-  /** Returns {done: true} at the exit, else the new position (null if refused). */
+  /** Returns {done: true} at the exit, else {done: false, position, cell} (position null if refused). */
   const move = async (direction) => {
     const result = await ns.dnet.authenticate(hostname, direction);
     if (result.success) {
@@ -774,7 +880,11 @@ export const stepLabyrinth = async (ns, state, hostname) => {
       throw new Cannot(result.message);
     }
     const arrived = /moved to (\d+),(\d+)/.exec(result.message ?? "");
-    return { done: false, position: arrived ? [Number(arrived[1]), Number(arrived[2])] : null };
+    return {
+      done: false,
+      position: arrived ? [Number(arrived[1]), Number(arrived[2])] : null,
+      cell: parseLabSurroundings(result.data),
+    };
   };
 
   try {
@@ -801,10 +911,12 @@ export const stepLabyrinth = async (ns, state, hostname) => {
           continue;
         }
         lab.position = result.position;
-        lab.visited.add(result.position.join(","));
+        const key = result.position.join(",");
+        lab.visited.add(key);
         lab.path.push(next);
-        if (!lab.cells.has(result.position.join(","))) {
-          lab.cells.set(result.position.join(","), await report());
+        if (!lab.cells.has(key)) {
+          // authenticate() already returns the 3x3 surroundings in result.data, avoiding a separate labreport() call
+          lab.cells.set(key, result.cell ?? (await report()));
         }
         continue;
       }
