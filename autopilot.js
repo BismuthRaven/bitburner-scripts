@@ -8,18 +8,17 @@ import { COORDINATOR as DARKNET_COORDINATOR, DAEMON as DARKNET_DAEMON, WORM as D
 
 const argsSchema = [ // The set of all command line arguments
     ['next-bn', 0], // If we destroy the current BN, the next BN to start
-    ['disable-auto-destroy-bn', true], // Set to true if you do not want to auto destroy this BN when done
-    ['install-at-aug-count', 15], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
-    ['install-at-aug-plus-nf-count', 20], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['disable-auto-destroy-bn', false], // Set to true if you do not want to auto destroy this BN when done
+    ['install-at-aug-count', 10], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
+    ['install-at-aug-plus-nf-count', 15], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
-    ['install-countdown', 10 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
-    ['aug-purchase-interval', 60 * 1000], // When buying augs without installing them ('Auto-buy augs' on, 'Auto-install augs' off), check for affordable augs this often
-    ['time-before-boosting-best-hack-server', 10 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
+    ['install-countdown', 1 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
+    ['aug-purchase-interval', 3 * 60 * 1000], // When buying augs without installing them ('Auto-buy augs' on, 'Auto-install augs' off), check for affordable augs this often
+    ['time-before-boosting-best-hack-server', 3 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
-    ['interval', 2 * 1000], // Wake up this often (milliseconds) to check on things
+    ['interval', 5 * 1000], // Wake up this often (milliseconds) to check on things
     ['interval-check-scripts', 5 * 1000], // Get a listing of all running processes on home this frequently
-    ['high-hack-threshold', 3000], // Once hack level reaches this, we start daemon in high-performance hacking mode
-    ['enable-bladeburner', null], // (Deprecated) Bladeburner is now always enabled if it's available. Use '--disable-bladeburner' to explicitly turn off
+    ['high-hack-threshold', 4000], // Once hack level reaches this, we start daemon in high-performance hacking mode
     ['disable-bladeburner', false], // This will instruct daemon.js not to run the bladeburner.js, even if bladeburner is available.
     ['wait-for-4s-threshold', 0.8], // Set to 0 to not reset until we have 4S. If money is above this ratio of the 4S Tix API cost, don't reset until we buy it.
     ['disable-wait-for-4s', false], // If true, will doesn't wait for the 4S Tix API to be acquired under any circumstantes
