@@ -983,6 +983,7 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
             lastStatusUpdateTime = Date.now();
             // Measure approximately how quickly we're gaining reputation to give a rough ETA
             const repGainRate = await measureFactionRepGainRate(ns, factionName);
+            publishRepRate(ns, factionName, repGainRate);
             const eta_milliseconds = 1000 * (factionRepRequired - currentReputation) / repGainRate;
             ns.print(`${status} Currently at ${Math.round(currentReputation).toLocaleString('en')}, ` +
                 `earning ${formatNumberShort(repGainRate)} rep/sec. ` +
@@ -1042,6 +1043,23 @@ async function measureFactionRepGainRate(ns, factionName) {
  * @param {NS} ns */
 async function measureCompanyRepGainRate(ns, companyName) {
     return await measureRepGainRate(ns, async () => await getCompanyReputation(ns, companyName));
+}
+
+/** Publish measured faction rep rates to MachineState/rep-rates.txt (0 GB write) so autopilot.js can forecast
+ * when a reputation-gated augmentation becomes affordable. Only rewritten when a rate moves by more than 10%.
+ * @param {NS} ns @param {string} factionName @param {number} repPerSec */
+function publishRepRate(ns, factionName, repPerSec) {
+    const file = "MachineState/rep-rates.txt";
+    let data;
+    try { data = JSON.parse(ns.read(file) || "{}"); } catch { data = {}; }
+    data.rates ??= {};
+    const previous = data.rates[factionName] ?? 0;
+    const materiallyChanged = Math.abs(repPerSec - previous) > 0.1 * Math.max(previous, 1);
+    data.rates[factionName] = repPerSec;
+    if (materiallyChanged || Date.now() - (data.time ?? 0) > 60 * 1000) { // Also refresh the timestamp so the rates don't go stale
+        data.time = Date.now();
+        ns.write(file, JSON.stringify(data), "w");
+    }
 }
 
 /** Try all work types and see what gives the best rep gain with this faction!

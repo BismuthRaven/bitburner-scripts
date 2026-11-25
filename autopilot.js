@@ -5,6 +5,7 @@ import {
 } from './helpers.js'
 import { isModuleEnabled, AUTOPILOT_STATUS_FILE } from './helpers-gui.js'
 import { COORDINATOR as DARKNET_COORDINATOR, DAEMON as DARKNET_DAEMON, WORM as DARKNET_WORM, buildOf, stampBuild } from './darknet/darknet-paths.js'
+import { grossEarnings, estimateIncomeRate, forecastAugTiming, decideInstallTiming } from './aug-forecast.js'
 
 const argsSchema = [ // The set of all command line arguments
     ['next-bn', 0], // If we destroy the current BN, the next BN to start
@@ -12,7 +13,12 @@ const argsSchema = [ // The set of all command line arguments
     ['install-at-aug-count', 10], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-at-aug-plus-nf-count', 15], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
-    ['install-countdown', 1 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (we might just be gaining momentum)
+    ['install-countdown', 1 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (forecast padding, or the whole wait when the forecast is unsure)
+    ['forecast-confidence-threshold', 0.7], // Below this, an install-timing forecast is not trusted and --install-countdown is used instead
+    ['forecast-horizon', 5 * 60 * 1000], // If the aug that reaches the install threshold is further out than this, install now instead of waiting
+    ['forecast-min-samples', 12], // Income samples needed before trusting the measured income rate (~1 minute at 5s intervals)
+    ['forecast-window', 10 * 60 * 1000], // How far back income samples are kept when measuring the income rate
+    ['disable-forecast', false], // Force the old behaviour: decide when to install purely from --install-countdown
     ['aug-purchase-interval', 3 * 60 * 1000], // When buying augs without installing them ('Auto-buy augs' on, 'Auto-install augs' off), check for affordable augs this often
     ['time-before-boosting-best-hack-server', 3 * 60 * 1000], // Wait this long before picking our best hack-income server and spending hashes on boosting it
     ['reduced-aug-requirement-per-hour', 0.5], // For every hour since the last reset, require this many fewer augs to install.
@@ -107,6 +113,11 @@ export async function main(ns) {
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
+    let incomeSamples = []; // Ring buffer of { t, y } cumulative gross-earnings samples, used to measure the income rate
+    let lastIncomeSampleTime = 0; // Last time we took an income sample
+    let lastForecast = null; // The most recent install-timing forecast (published for autopilot-gui.js)
+    let lastMoneySources = null, lastMoneySourcesTime = 0; // ns.getMoneySources() is 1 GB, so it is sampled at most once per loop
+    let repRateSample = null; // { faction, rep, time } for measuring the rep rate of the faction we're working for
     let lastAugPurchaseCheck = 0; // Last time we ran a buy-only purchase (rate-limits the RAM-heavy faction-manager runs)
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
@@ -253,9 +264,11 @@ export async function main(ns) {
         if (isModuleEnabled(ns, 'ap-destroy-bn')) await checkIfBnIsComplete(ns, player);
         if (isModuleEnabled(ns, 'stanek')) await maybeAcceptStaneksGift(ns, player);
         await checkOnRunningScripts(ns, player);
+        // Sample income first so the casino check below can reuse the (cached) ns.getMoneySources result
+        if ((4 in unlockedSFs) && !options['disable-forecast']) await sampleIncome(ns); // Ring buffer behind the install-timing forecast
         if (isModuleEnabled(ns, 'ap-casino')) await maybeDoCasino(ns, player);
         if (isModuleEnabled(ns, 'darknet')) await maybeRunDarknet(ns);
-        if (isModuleEnabled(ns, 'ap-buy-augs') || isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player);
+        if (isModuleEnabled(ns, 'ap-buy-augs') || isModuleEnabled(ns, 'ap-install-augs')) await maybeInstallAugmentations(ns, player, stocksValue);
         publishStatus(ns); // Update the snapshot autopilot-gui.js reads (after the status text has been set)
         return shouldWeKeepRunning(ns); // Return false to shut down autopilot.js if we installed augs, or don't have enough home RAM
     }
@@ -733,11 +746,15 @@ export async function main(ns) {
         }
     }
 
-    /** Get the source of the player's earnings by category.
+    /** Get the source of the player's earnings by category. Cached for one main-loop tick: getMoneySources is 1 GB
+     * and both the casino check and the install forecast want it.
      * @param {NS} ns
      * @returns {Promise<MoneySources>} */
     async function getPlayerMoneySources(ns) {
-        return await getNsDataThroughFile(ns, 'ns.getMoneySources()');
+        if (lastMoneySources && lastMoneySourcesTime > Date.now() - options['interval']) return lastMoneySources;
+        lastMoneySources = await getNsDataThroughFile(ns, 'ns.getMoneySources()');
+        lastMoneySourcesTime = Date.now();
+        return lastMoneySources;
     }
 
     /** Accept Stanek's gift immediately at the start of the BN (as opposed to just before the first install)
@@ -857,16 +874,111 @@ export async function main(ns) {
      *             owned_augs: string[], owned_count: number, owned_count_nf: number, owned_count_ex_nf: number,
      *             awaiting_install_augs: string[], awaiting_install_count: number, awaiting_install_count_nf: number, awaiting_install_count_ex_nf: number,
      *             affordable_augs: string[], affordable_count: number, affordable_count_nf: number, affordable_count_ex_nf: number,
-     *             total_rep_cost: number, total_aug_cost: number, unowned_count: number }} */
+     *             total_rep_cost: number, total_aug_cost: number, unowned_count: number,
+     *             forecast: { next_augs: any[], next_nf: any, budget: number, time: number }|undefined }} */
     function getFactionManagerOutput(ns) {
         const facmanOutput = ns.read(factionManagerOutputFile)
         return !facmanOutput ? null : JSON.parse(facmanOutput)
     }
 
+    /** Sample cumulative gross earnings once per main-loop tick into the ring buffer behind the install forecast.
+     * Stock earnings are left out of the series because they only land when a position is sold.
+     * @param {NS} ns */
+    async function sampleIncome(ns) {
+        if (lastIncomeSampleTime > Date.now() - options['interval']) return; // Already sampled this tick
+        const now = Date.now();
+        lastIncomeSampleTime = now;
+        let sources;
+        try { sources = await getPlayerMoneySources(ns); } catch (err) { return; } // Low RAM: no samples this tick
+        const earnings = grossEarnings(sources, false);
+        // Cumulative earnings since install drop to 0 when the player resets: the old samples would poison the slope
+        if (incomeSamples.length > 0 && earnings < incomeSamples[incomeSamples.length - 1].y) incomeSamples = [];
+        incomeSamples.push({ t: now, y: earnings });
+        const cutoff = now - options['forecast-window'];
+        while (incomeSamples.length > 0 && incomeSamples[0].t < cutoff) incomeSamples.shift();
+    }
+
+    /** Published rep rates (MachineState/rep-rates.txt, written by work-for-factions.js), or null when missing/stale.
+     * @param {NS} ns @returns {{[faction: string]: number}|null} */
+    function getPublishedRepRates(ns) {
+        const text = ns.read("MachineState/rep-rates.txt");
+        if (!text) return null;
+        try {
+            const data = JSON.parse(text);
+            // A rate is only useful while somebody is still working for that faction
+            return Date.now() - data.time > 5 * 60 * 1000 ? null : data.rates ?? null;
+        } catch { return null; }
+    }
+
+    /** Sample the rep of the faction the player is currently working for (~1 GB x mult, ram-dodged), so a rep-gated
+     * aug has an ETA even before work-for-factions.js has published its own measurement.
+     * @param {NS} ns @param {{[faction: string]: number}} repRates */
+    async function sampleWorkingRepRate(ns, repRates) {
+        const work = await getNsDataThroughFile(ns, 'ns.singularity.getCurrentWork()', '/Temp/current-work.txt');
+        if (!work || !work.factionName) return; // Not doing faction work
+        const faction = work.factionName;
+        const rep = await getNsDataThroughFile(ns, `ns.singularity.getFactionRep(ns.args[0])`, null, [faction]);
+        const now = Date.now();
+        if (repRateSample && repRateSample.faction == faction) {
+            const elapsed = (now - repRateSample.time) / 1000;
+            if (elapsed >= 1) {
+                const rate = Math.max(0, (rep - repRateSample.rep) / elapsed);
+                if (rate > 0) repRates[faction] = Math.max(repRates[faction] || 0, rate);
+                repRateSample = null;
+                return;
+            }
+            return; // Too soon to sample again
+        }
+        repRateSample = { faction, rep, time: now };
+    }
+
+    /** Whether a current prediction of our income/rep growth can be trusted at all. */
+    function isForecastMature() {
+        if (options['disable-forecast']) return false;
+        if (!(4 in unlockedSFs)) return false;
+        if (getTimeInAug() < 60 * 1000) return false; // Income has not stabilised yet (the casino check waits for the same reason)
+        return incomeSamples.length > 0; // No samples yet (e.g. low RAM for getMoneySources)
+    }
+
+    /** Forecast when the next augmentations (and the aug that reaches the install threshold) become affordable.
+     * @param {NS} ns
+     * @param {{ forecast?: { next_augs: any[], time: number } }} facman
+     * @param {number} budget The money autopilot is committing to augmentations (cash + stocks)
+     * @param {number} augsNeeded
+     * @param {number} pendingAugCount
+     * @returns {Promise<null|{etaNextAug: number|null, etaToThreshold: number|null, nextAug: string|null, confidence: number,
+     *           reason: string, action: 'install'|'wait'|'timer', waitMs: number, incomeRate: number}>} */
+    async function forecastInstallTiming(ns, facman, budget, augsNeeded, pendingAugCount) {
+        if (!facman.forecast) return null; // faction-manager output predates the forecast block: use the timer
+        const nextAugs = facman.forecast.next_augs;
+        if (Date.now() - (facman.forecast.time ?? 0) > 5 * 60 * 1000) return null; // Stale output: use the timer
+        // No unaffordable aug we could buy from a joined faction right now. That is either "nothing more is coming"
+        // or "we cannot see anything yet" (fresh reset, factions not joined): the forecast can't tell, so use the timer.
+        if (nextAugs.length == 0) return null;
+        const rate = estimateIncomeRate(incomeSamples, { minSamples: options['forecast-min-samples'] });
+        // Prefer the rates work-for-factions.js measured; sample our own as a fallback, but only when a
+        // rep-gated candidate actually needs one (getFactionRep is 1 GB x mult).
+        let repRates = getPublishedRepRates(ns) ?? {};
+        const lacksRate = aug => !aug.donations_unlocked && aug.rep_have < aug.rep_needed && !(aug.faction in repRates);
+        if (nextAugs.some(lacksRate)) await sampleWorkingRepRate(ns, repRates);
+        const forecast = forecastAugTiming({
+            nextAugs, budget, incomeRatePerSecond: rate.ratePerSecond, incomeQuality: rate.quality,
+            repRates, deficit: Math.max(1, augsNeeded - pendingAugCount), mature: isForecastMature(),
+            tauMs: options['forecast-horizon'] * 2,
+        });
+        if (!forecast) return null;
+        const decision = decideInstallTiming(forecast, {
+            confidenceThreshold: options['forecast-confidence-threshold'],
+            horizonMs: options['forecast-horizon'], paddingMs: options['install-countdown'],
+        });
+        return { ...forecast, reason: decision.reason, action: decision.action, waitMs: decision.waitMs, incomeRate: rate.ratePerSecond };
+    }
+
     /** Logic to detect if it's a good time to install augmentations, and if so, do so
      * @param {NS} ns
-     * @param {Player} player */
-    async function maybeInstallAugmentations(ns, player) {
+     * @param {Player} player
+     * @param {number} stocksValue The liquidation value of our stocks (part of the augmentation budget) */
+    async function maybeInstallAugmentations(ns, player, stocksValue) {
         if (!(4 in unlockedSFs))  // Cannot automate augmentations or installs without singularity
             return setStatus(ns, `No singularity access, so you're on your own. You should manually work for factions and install augmentations!`);
         // Buying and installing are separate switches in autopilot-gui.js: 'Auto-buy augs' purchases, 'Auto-install augs' resets
@@ -889,6 +1001,7 @@ export async function main(ns) {
         const facman = getFactionManagerOutput(ns);
         if (!facman) {
             setStatus(ns, `Faction manager output not available. Will try again later.`);
+            lastForecast = null;
             return reservedPurchase = 0;
         }
         playerInstalledAugCount = facman.installed_count; // Augmentations bought *and installed* by the player (used for Daedalus requirement)
@@ -958,6 +1071,7 @@ export async function main(ns) {
 
         // If not ready to reset, set a status with our progress and return
         if (!shouldReset) {
+            lastForecast = null; // No install is planned, so don't publish a stale "installing now / waiting" forecast
             setStatus(ns, `Currently at ${formatDuration(getTimeInAug())} since last aug. ` +
                 (canBuy ? `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` :
                     `Waiting for ${augsNeeded} augs (or ${augsNeededInclNf} including NeuroFlux levels) to be bought before installing.`) +
@@ -966,13 +1080,27 @@ export async function main(ns) {
             return reservedPurchase = 0; // If we were previously reserving money for a purchase, reset that flag now
         }
         // Buy-only mode ('Auto-install augs' off): purchase the batch autopilot would have installed, then stop short of resetting
-        if (!canInstall) return await buyAffordableAugs(ns, facman, augSummary);
+        if (!canInstall) {
+            lastForecast = null; // The forecast only decides when to install, which this mode never does
+            return await buyAffordableAugs(ns, facman, augSummary);
+        }
         // If we want to reset, but there is a reason to delay, don't reset
-        if (await shouldDelayInstall(ns, player, facman)) // If we're currently in a state where we should not be resetting, skip reset logic
+        if (await shouldDelayInstall(ns, player, facman)) { // If we're currently in a state where we should not be resetting, skip reset logic
+            lastForecast = null;
             return reservedPurchase = 0;
+        }
+
+        // Decide when to install: the forecast replaces the blind wait when it is trustworthy, and falls back to
+        // --install-countdown (as padding, or as the whole wait) when it is not. See .vault/aug-install-forecast.md
+        lastForecast = options['disable-forecast'] ? null :
+            await forecastInstallTiming(ns, facman, player.money + stocksValue, augsNeeded, pendingAugCount);
+        const timing = decideInstallTiming(lastForecast, {
+            confidenceThreshold: options['forecast-confidence-threshold'],
+            horizonMs: options['forecast-horizon'], paddingMs: options['install-countdown'],
+        });
 
         // Install-only mode has nothing to buy, but still give the usual heads-up before the reset
-        if (!canBuy && installCountdown == 0) installCountdown = Date.now() + options['install-countdown'];
+        if (!canBuy && installCountdown == 0 && timing.action != 'install') installCountdown = Date.now() + options['install-countdown'];
 
         // Ensure the money needed for the above augs doesn't get ripped out from under us by reserving it
         if (canBuy && reservedPurchase < totalCost) {
@@ -990,7 +1118,11 @@ export async function main(ns) {
                     const newCountDown = Date.now() + Math.max(10 * 1000, // At a bare minimum, wait 10 more seconds
                         // Heuristic: Linearly reduce the cooldown until we have doubled the aug count needed.
                         options['install-countdown'] * (1 - (installCountdownResets / augsNeededInclNf)));
-                    if (newCountDown > installCountdown) { // If the existing countdown remaining was longer than this, leave it be
+                    // The momentum stretch exists to catch augs that are about to come online. A trusted forecast answers
+                    // that question directly, so let it decide the wait instead of lengthening it behind its back.
+                    if (timing.action != 'timer')
+                        purchaseChangeLog += ' (Not extending the wait: the forecast predicts when the next augs arrive.)';
+                    else if (newCountDown > installCountdown) { // If the existing countdown remaining was longer than this, leave it be
                         installCountdown = newCountDown;
                         purchaseChangeLog = purchaseChangeLog + ' Resetting the timer before we install augmentations.'
                     }
@@ -999,10 +1131,20 @@ export async function main(ns) {
             }
             ns.write("MachineState/CashReserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
         }
-        // We must wait until the configured cooldown elapses before we install augs.
+
+        if (timing.action == 'install') {
+            installCountdown = 0; // The forecast is sure nothing more is coming, so don't pad the wait
+            resetStatus += `\n  Installing now: next aug ETA ${lastForecast?.etaNextAug == null ? 'unknown' : formatDuration(lastForecast.etaNextAug)}` +
+                ` (${(100 * (lastForecast?.confidence ?? 0)).toFixed(0)}% confidence, ${lastForecast?.reason ?? 'no forecast'}).`;
+        } else if (timing.action == 'wait') {
+            // A trusted forecast decides the wait, and it is re-run next loop so the estimate can only move earlier.
+            installCountdown = Date.now() + timing.waitMs;
+            resetStatus += `\n  Waiting ${formatDuration(timing.waitMs)} for the forecast: "${lastForecast.nextAug ?? '-'}" ETA ` +
+                `${formatDuration(lastForecast.etaNextAug)} (${(100 * lastForecast.confidence).toFixed(0)}% confidence).`;
+        }
+        // We must wait until the countdown (forecast padding, or the plain timer) elapses before we install augs.
         if (installCountdown > Date.now()) {
-            resetStatus += `\n  Waiting for ${formatDuration(options['install-countdown'])} (--install-countdown) ` +
-                `to elapse before we install, in case we're close to being able to purchase more augmentations...`;
+            resetStatus += `\n  Waiting ${formatDuration(installCountdown - Date.now())} before we install, in case we're close to being able to purchase more augmentations...`;
             setStatus(ns, resetStatus);
             ns.toast(`Heads up: Autopilot plans to reset in ${formatDuration(installCountdown - Date.now())}`, 'info');
             return reservedPurchase = totalCost;
@@ -1265,6 +1407,14 @@ export async function main(ns) {
             time: Date.now(), pid: ns.pid, status: lastStatusLog,
             installAt: installCountdown || 0, reservedPurchase, nextBn,
             wantedDaemonArgs, recentLaunches,
+            // Only what the GUI renders: full candidate lists would bloat a file written every 5 seconds
+            forecast: lastForecast ? {
+                etaNextAug: lastForecast.etaNextAug, etaToThreshold: lastForecast.etaToThreshold,
+                nextAug: lastForecast.nextAug, confidence: lastForecast.confidence,
+                trendConfidence: lastForecast.trendConfidence, reason: lastForecast.reason,
+                action: lastForecast.action, incomeRate: lastForecast.incomeRate,
+                horizon: options['forecast-horizon'],
+            } : null,
             flags: Object.fromEntries(Object.entries(options ?? {}).filter(([k]) => k != "_" && options[k] === true)),
         }), "w");
     }
