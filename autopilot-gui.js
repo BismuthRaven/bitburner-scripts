@@ -163,9 +163,18 @@ function ActivityTab({ store, k, d, ap, dm }) {
     // Autopilot
     const a = ap.status;
     const flags = a ? Object.entries(a.flags).filter(([, v]) => v).map(([f]) => f) : [];
+    const f = a?.forecast;
+    const eta = ms => ms == null ? "unknown" : formatDuration(ms);
+    const conf = pct => `${(100 * (pct ?? 0)).toFixed(0)}%`;
+    const forecastLine = !f ? null
+        : f.reason === "beyond-horizon" ? pre(`Installing now: next aug ETA ${eta(f.etaNextAug)} (confidence ${conf(f.confidence)}) - beyond the horizon`, t.success)
+        : f.reason === "no-more-augs" ? pre(`Installing now: nothing more is coming (confidence ${conf(f.confidence)})`, t.success)
+        : pre(`Next aug: ${f.nextAug ? `"${f.nextAug}"` : "-"} ETA ${eta(f.etaNextAug)} (confidence ${conf(f.confidence)}) - ` +
+            (f.action === "wait" ? "waiting" : f.reason.replace(/-/g, " ")), f.reason === "low-confidence" || f.reason === "unknown" ? t.secondary : t.primary);
     const apPart = a ? [
         pre(a.status || "(no status yet)"),
         a.installAt ? pre(`Install (reset) in ${formatDuration(Math.max(0, a.installAt - Date.now()))} - reserving ${formatMoney(a.reservedPurchase)}`, t.warning) : null,
+        forecastLine,
         pre(`Next BN: ${a.nextBn} | wants daemon args: ${a.wantedDaemonArgs.length ? a.wantedDaemonArgs.join(" ") : "(none)"}` +
             (disabled.has("ap-daemon") ? " (not applied: 'Manage daemon' is off)" : ""), t.secondary),
         flags.length ? pre(`Flags: ${flags.join(", ")}`, t.secondary) : null,

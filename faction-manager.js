@@ -33,6 +33,8 @@ let augmentationData = (/**@returns {{[augmentationName: string]: AugmentationDa
 let purchaseableAugs = (/**@returns {AugmentationData[]}*/() => [])();
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)();
 let printToTerminal, ignorePlayerData;
+let forecastBlock = null; // Structured "next augs we could not afford" data for autopilot's install-timing forecast
+let availableAugsForForecast = []; // Augs we could buy from a joined faction if we had the money/rep
 let _ns; // Used to avoid passing ns to functions that don't need it except for some logs.
 
 let options = null; // A copy of the options used at construction time
@@ -103,6 +105,8 @@ export async function main(ns) {
 
     // Ensure all globals are reset before we proceed with the script, in case we've done things out of order
     augCountMult = favorToDonate = playerData = gangFaction = nfLevelPurchased = startingPlayerMoney = stockValue = null;
+    forecastBlock = null;
+    availableAugsForForecast = [];
     factionNames = [], joinedFactions = [], desiredAugs = [], desiredStatsFilters = [], purchaseFactionDonations = [];
     ownedAugmentations = [], simulatedOwnedAugmentations = [], effectiveSourceFiles = {}, allAugStats = [], priorityAugs = [], purchaseableAugs = [];
     factionData = {}, augmentationData = {}, bitNodeMults = {};
@@ -244,6 +248,8 @@ export async function main(ns) {
             total_aug_cost: getTotalCost(purchaseableAugs), // Total money needed to buy all affordable augs (excludes the rep cost above)
             // Unpurchased augs
             unpurchased_count: Object.values(augmentationData).filter(a => !a.owned).length, // Number of augs are we have not yet purchased (note: depending on config, may not include all augs in the game)
+            // Structured data for autopilot.js's install-timing forecast (see .vault/aug-install-forecast.md)
+            forecast: forecastBlock,
         }, undefined, 2), "w");
     }
 }
@@ -616,6 +622,7 @@ async function manageUnownedAugmentations(ns, ignoredAugs) {
     if (unownedAugs.length == 0) return log(ns, `All ${Object.keys(augmentationData).length} augmentations are either owned or ignored!`, printToTerminal)
     let unavailableAugs = unownedAugs.filter(aug => aug.getFromJoined() == null);
     let availableAugs = unownedAugs.filter(aug => aug.getFromJoined() != null);
+    availableAugsForForecast = availableAugs.filter(aug => aug.name != strNF); // Backdrop for the install-timing forecast
     // List unavailable augs only if there are none available, or if the user specifically requested to see this list.
     if (availableAugs.length == 0 || unavailableAugs.length > 0 && options['show-unavailable-aug-purchase-order'])
         await manageFilteredSubset(ns, outputRows, 'Unavailable', unavailableAugs, true, false);
@@ -708,6 +715,45 @@ async function manageFilteredSubset(ns, outputRows, subsetName, subset, printLis
     return subsetSorted;
 }
 
+/** Helper to build the structured "next augs" list autopilot.js forecasts install timing from.
+ * Candidates are the augs dropped for budget reasons plus every other unowned aug we could currently buy from a
+ * joined faction - the realistic set of "augs we are waiting for".
+ * @param {number} budget The money used for this run (cash + stocks)
+ * @param {{ aug: AugmentationData }[]} dropped The augs that did not fit the purchase order
+ * @param {number} totalAugCost The cost of the augs we *can* afford, in purchase order
+ * @param {number} totalRepCost The rep donations those augs require
+ * @param {any} nextNf The next NF level that did not fit, if any
+ * @returns {{ next_augs: any[], next_nf: any, budget: number, time: number }} */
+function buildForecastBlock(budget, dropped, totalAugCost, totalRepCost, nextNf) {
+    const augCount = purchaseableAugs.length;
+    // An aug that was dropped because the *batch* does not fit still fits on its own, so its gap is measured against
+    // the committed purchase: how much more money the whole batch would need to include it.
+    const candidateAugs = [...dropped.map(d => d.aug), ...availableAugsForForecast]
+        .filter((aug, i, all) => aug.name != strNF && all.findIndex(a => a.name == aug.name) == i)
+        .map(aug => {
+            const factionName = aug.getFromJoined();
+            const faction = factionData[factionName];
+            const scaledPrice = aug.price * augCountMult ** augCount;
+            const repHave = faction?.reputation || 0;
+            const donationsUnlocked = !!faction?.donationsUnlocked;
+            // Rep is bought with money when donations are unlocked; only count the part not already committed
+            const donation = faction
+                ? Math.max(0, getReqDonationForRep(aug.reputation, faction) - (purchaseFactionDonations[factionName] || 0))
+                : 0;
+            const moneyNeeded = totalAugCost + scaledPrice + totalRepCost + donation;
+            return {
+                name: aug.name, faction: factionName ?? null,
+                money_needed: moneyNeeded,
+                rep_needed: aug.reputation, rep_have: repHave, donations_unlocked: donationsUnlocked,
+                money_gap: Math.max(0, moneyNeeded - budget),
+                rep_gap: donationsUnlocked ? 0 : Math.max(0, aug.reputation - repHave),
+            };
+        })
+        .sort((a, b) => a.money_needed - b.money_needed) // Cheapest first: those come online soonest
+        .slice(0, 20); // Bounded: the file is rewritten every faction-manager run
+    return { next_augs: candidateAugs, next_nf: nextNf ?? null, budget, time: Date.now() };
+}
+
 /** @param {NS} ns
  * Prepares a "purchase order" of augs that we can afford.
  * Note: Stores this info in global properties `purchaseableAugs` and `purchaseFactionDonations` so that a final action in the main method will do the purchase. */
@@ -749,6 +795,8 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
 
     // Display unique affordable augs, but only show the full list if we aren't adding NeuroFlux levels below
     manageFilteredSubset(ns, outputRows, 'Unique Affordable', purchaseableAugs, options['neuroflux-disabled']);
+    // Kept for the forecast block: the cost of the unique augs (before NeuroFlux levels inflate the totals)
+    const uniqueAugCost = totalAugCost, uniqueRepCost = totalRepCost;
 
     // The the user know about some of the next upcoming augs / import augs that had to be dropped
     let nextUpAug = dropped.length == 0 ? null : `Next desired aug available at:`.padEnd(37) + ` ${dropped[0].costBefore}  ` +
@@ -764,7 +812,10 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
         outputRows.push(`INFO: ${additionalDroppedPri.length} 'priority' augs had to be droped: ${additionalDroppedPri.map(n => `"${n}"`).join(", ")}`);
 
     // NEXT STEP: Add as many NeuroFlux levels to our purchase as we can (unless disabled)
-    if (options['neuroflux-disabled']) return;
+    if (options['neuroflux-disabled']) {
+        forecastBlock = buildForecastBlock(budget, dropped, uniqueAugCost, uniqueRepCost, null);
+        return;
+    }
     const augNf = augmentationData[strNF];
     // We can reverse-engineer our current NeuroFlux level by looking at its current price, and knowing its cost scales at x1.14 per level.
     nfLevelPurchased = Math.round(Math.log(augNf.price / (augCountMult ** numAugsAwaitingInstall * 750000 * bitNodeMults.AugmentationMoneyCost)) / Math.log(1.14));
@@ -823,7 +874,7 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
         log(ns, `Getting NF from faction ${augNfFaction.name} (rep: ${formatNumberShort(augNfFaction.reputation)}). Price of next NF (Level ${nextNfLevel}) is ` +
             `${formatMoney(augNf.price)}, requires reputation: ${formatNumberShort(augNf.reputation)} ` +
             `(have ${formatNumberShort(augNfFaction.reputation)}, donate ${formatNumberShort(getReqDonationForRep(augNf.reputation, augNfFaction))})`);
-    let nextUpNf; // Will tell the user when they will unlock the next NF level
+    let nextUpNf, nextUpNfDetails; // Will tell the user (and autopilot.js) when they will unlock the next NF level
     while (augNfFaction && nfPurchased < 200) { // Limit to 200 to avoid breaking the game if near infinite money.
         const nextNfCost = augNf.price * (nfCountMult ** nfPurchased) * (augCountMult ** purchaseableAugs.length);
         const nextNfRep = augNf.reputation * (nfCountMult ** nfPurchased);
@@ -841,6 +892,13 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
                 (nextNfRep > augNfFaction.reputation && !augNfFaction.donationsUnlocked ? '✗' : '✓') +
                 ` have ${formatNumberShort(augNfFaction.reputation)}` + (nextNfRep <= augNfFaction.reputation ? '' :
                     augNfFaction.donationsUnlocked ? ', can donate' : ', donations unavailable') + `)`;
+            nextUpNfDetails = {
+                level: nextNfLevel, faction: augNfFaction.name,
+                money_needed: totalAugCost + nextNfCost + totalRepCost + nextNfRepCost,
+                rep_needed: nextNfRep, rep_have: augNfFaction.reputation, donations_unlocked: augNfFaction.donationsUnlocked,
+                money_gap: Math.max(0, totalCostWithNextNf - budget),
+                rep_gap: augNfFaction.donationsUnlocked ? 0 : Math.max(0, nextNfRep - augNfFaction.reputation),
+            };
             break; // If we cannot afford the next NF, break
         }
         // Otherwise, add the next NF to our purchase order, and see if we can afford any more.
@@ -862,6 +920,7 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
     manageFilteredSubset(ns, outputRows, `(${purchaseableAugs.length - nfPurchased} Augs + ${nfPurchased} NF)`, purchaseableAugs, true, false, false);
     if (nextUpAug) outputRows.push(nextUpAug);
     if (nextUpNf) outputRows.push(nextUpNf);
+    forecastBlock = buildForecastBlock(budget, dropped, uniqueAugCost, uniqueRepCost, nextUpNfDetails);
 };
 
 /** Find out the optimal set of factions and rep-donations required to access them

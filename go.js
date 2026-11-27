@@ -13,14 +13,14 @@
 import {
     getConfiguration, instanceCount, log, getErrorInfo, getActiveSourceFiles, getNsDataThroughFile, formatTime
 } from './helpers.js'
-import { GoBoard, BLACK, selectBestMove, findSnakeEyesTarget } from './go-engine.js'
+import { GoBoard, BLACK, MCTSSession, selectBestMove, findSnakeEyesTarget } from './go-engine.js'
 
 const argsSchema = [
     ['cheats', true], // (Now true by default - but still an option for backwards compatibility) This is only possible if you have BN14.2
     ['disable-cheats', false], // Set to true if you want to *not* use cheats for some reason.
-    ['cheat-chance-threshold', 0.8], // Don't cheat if our success chance is less than this
-    ['think-time', 180], // MCTS think time per move in ms (higher = stronger, still well under opponent turn delay)
-    ['max-sims', 2500], // Maximum MCTS simulations per move
+    ['cheat-chance-threshold', 0.75], // Don't cheat if our success chance is less than this
+    ['think-time', 250], // MCTS think time per move in ms (higher = stronger, still well under opponent turn delay)
+    ['max-sims', 12000], // Maximum MCTS simulations per move
     ['legacy', false], // Fall back to the original heuristic pattern player instead of MCTS+RAVE
     ['logtime', false], // Logs time time it takes for each player to take their move
     ['runOnce', false], // Will only play one game if enabled
@@ -37,8 +37,8 @@ export function autocomplete(data, args) {
  * @param {NS} ns */
 export async function main(ns) {
     let cheats = false;
-    let cheatChanceThreshold = 0.8;
-    let thinkTimeMs = 180;
+    let cheatChanceThreshold = 0.75;
+    let thinkTimeMs = 250;
     let maxSims = 2500;
     let useLegacy = false;
     let logtime = false;
@@ -103,8 +103,8 @@ export async function main(ns) {
 
         logtime = runOptions.logtime;
         runOnce = runOptions.runOnce;
-        thinkTimeMs = Math.max(10, Number(runOptions['think-time']) || 120);
-        maxSims = Math.max(50, Number(runOptions['max-sims']) || 2000);
+        thinkTimeMs = Math.max(10, Number(runOptions['think-time']) || 250);
+        maxSims = Math.max(50, Number(runOptions['max-sims']) || 12000);
         useLegacy = Boolean(runOptions.legacy);
 
         const sourceFiles = await getActiveSourceFiles(ns, true);
@@ -175,6 +175,7 @@ export async function main(ns) {
         let lastOpponentResult = await ns.go.opponentNextTurn(false)
         checkNewGame(ns, lastOpponentResult)
         let playStyle = getStyle(ns);
+        const mctsSession = new MCTSSession();
         ns.printf("Playing as Black (X) vs %s (White / O) [%dx%d]", ns.go.getOpponent(), startBoard.length, startBoard.length);
         while (true) {
             turn++
@@ -199,6 +200,7 @@ export async function main(ns) {
                             coords: [target.x1, target.y1, target.x2, target.y2],
                             msg: `SnakeEyes Cheat (kills ${target.killed})`
                         });
+                        if (results) mctsSession.reset(); // Board mutated by 2-move cheat
                     }
                 }
                 if (!results) {
@@ -212,6 +214,7 @@ export async function main(ns) {
                         maxIterations: maxSims,
                         color: BLACK,
                         analysis,
+                        session: mctsSession,
                     });
                     if (choice.type === "move") {
                         results = await movePiece(ns, { coords: [choice.x, choice.y], msg: choice.msg });
@@ -373,6 +376,7 @@ export async function main(ns) {
             lastOpponentResult = results;
             if (checkNewGame(ns, results)) {
                 playStyle = getStyle(ns);
+                mctsSession.reset();
             }
         }
     }

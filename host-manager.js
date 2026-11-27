@@ -28,8 +28,8 @@ const argsSchema = [
     ['reserve-by-time-decay-factor', 0.2], // Controls how quickly our % reserve increases from --reserve-percent to 100% over time. For example, if --reserve-percent is set to 0.05 (allow spending 95% of money), time to reduce spending to ~25% of money is ~6hrs at 0.2, ~4hrs at 0.3, ~2hrs at 0.5
     ['budget', Number.POSITIVE_INFINITY], // Yet another way to control spending, this budget will not be exceeded, regardless of player owned money. Reserves are still respected.
     ['allow-worse-purchases', false], // Set to true to allow purchase of servers worse than our current best purchased server
-    ['compare-to-home-threshold', 0.25], // Do not bother buying servers unless they are at least this big compared to current home RAM
-    ['compare-to-network-ram-threshold', 0.02], // Do not bother buying servers unless they are at least this big compared to total network RAM
+    ['compare-to-home-threshold', 0.05], // Do not bother buying servers unless they are at least this big compared to current home RAM
+    ['compare-to-network-ram-threshold', 0.01], // Do not bother buying servers unless they are at least this big compared to total network RAM
 ];
 
 export function autocomplete(data, _) {
@@ -89,7 +89,12 @@ export async function main(ns) {
         log(ns, `host-manager will run once. Run with argument "-c" to run continuously.`)
     do {
         absReservedMoney = options['absolute-reserve'] != null ? Number(options['absolute-reserve']) : Number(ns.read("MachineState/CashReserve.txt") || 0);
-        await tryToBuyBestServerPossible(ns);
+        // Buy/upgrade as many servers as our current budget & thresholds allow in a single pass
+        let boughtCount = 0;
+        while (boughtCount < maxPurchasedServers * 2 && await tryToBuyBestServerPossible(ns)) {
+            boughtCount++;
+            await ns.sleep(20);
+        }
         if (keepRunning)
             await ns.sleep(options['interval']);
     } while (keepRunning);
@@ -98,15 +103,16 @@ export async function main(ns) {
 // Logging system to only print a log if it is different from the last log printed.
 let lastStatus = "";
 function setStatus(ns, logMessage) {
-    return logMessage != lastStatus ? ns.print(lastStatus = logMessage) : false;
+    if (logMessage != lastStatus) ns.print(lastStatus = logMessage);
+    return false;
 }
 
 /** @param {NS} ns
-  * Attempts to buy a server at or better than your home machine. **/
+  * Attempts to buy or upgrade a server. Returns true if a purchase/upgrade occurred. **/
 async function tryToBuyBestServerPossible(ns) {
     // Scan the set of all servers on the network that we own (or rooted) to get a sense of current RAM utilization
     let rootedServers = await getNsDataThroughFile(ns, 'scanAllServers(ns).filter(s => ns.hasRootAccess(s))', '/Temp/rooted-servers.txt');
-    // Gether the list of all purchased servers.
+    // Gather the list of all purchased servers.
     let purchasedServers = null;
     try { purchasedServers = await getNsDataThroughFile(ns, 'ns.cloud.getServerNames()', null, null, null, 3, 5, /* silent errors */ true); } catch { /* Ignore */ }
     if (purchasedServers == null) // Early game, if we have insufficient RAM (1.05 GB cloud.getServerNames + 1.6 base cost), we can fall-back to guessing based on their name
@@ -132,14 +138,13 @@ async function tryToBuyBestServerPossible(ns) {
             `(Triggers at ${options['utilization-trigger'] * 100}%, ${purchasedServers.length} bought so far)`);
         // If utilization is below target. We don't need another server.
         if (utilizationRate < options['utilization-trigger'])
-            return;
+            return false;
     }
-
 
     // Check for other reasons not to go ahead with the purchase
     let prefix = 'Host-manager wants to buy another server, but ';
 
-    // Determine our budget for spending money on home RAM
+    // Determine our budget for spending money on servers
     let cashMoney = await getNsDataThroughFile(ns, `ns.getServerMoneyAvailable(ns.args[0])`, null, ["home"]);
     if (options['reserve-by-time']) { // Option to vary pctReservedMoney by time since augment.
         // Decay factor of 0.2 = Starts willing to spend 95% of our money, backing down to ~75% at 1 hour, ~60% at 2 hours, ~25% at 6 hours, and ~10% at 10 hours.
@@ -157,7 +162,6 @@ async function tryToBuyBestServerPossible(ns) {
     let spendableMoney = Math.min(budget, cashMoney * (1.0 - pctReservedMoney), cashMoney - absReservedMoney);
     if (spendableMoney <= 0.01) {
         if (!keepRunning) // Show a more detailed log if we aren't running continuously
-
             return setStatus(ns, `${prefix}all player cash (${formatMoney(cashMoney)}) is currently reserved (budget: ${formatMoney(budget)}, ` +
                 `abs reserve: ${formatMoney(absReservedMoney)}, ` +
                 `% reserve: ${(pctReservedMoney * 100).toFixed(1)}% (${formatMoney(cashMoney * (1.0 - pctReservedMoney))}))`);
@@ -166,38 +170,7 @@ async function tryToBuyBestServerPossible(ns) {
             `abs reserve: ${formatMoney(absReservedMoney)}, % reserve: ${(pctReservedMoney * 100).toFixed(1)}%)`);
     }
 
-    // Determine the most ram we can buy with our current money
-    let exponentLevel = 1;
-    for (; exponentLevel < maxPurchasableServerRamExponent; exponentLevel++)
-        if (costByRamExponent[exponentLevel + 1] > spendableMoney)
-            break;
-    let cost = costByRamExponent[exponentLevel];
-    let maxRamPossibleToBuy = Math.pow(2, exponentLevel);
-
-    // Don't buy if it would put us below our reserve (shouldn't happen, since we calculated how much to buy based on reserve amount)
-    if (spendableMoney < cost)
-        return setStatus(ns, `${prefix}spendableMoney (${formatMoney(spendableMoney)}) is less than the cost ` +
-            `of even the cheapest server (${formatMoney(cost)} for ${formatRam(2 ** exponentLevel)})`);
-    // Don't buy if we can't afford our configured --min-ram-exponent
-    if (exponentLevel < minRamExponent)
-        return setStatus(ns, `${prefix}The highest ram exponent we can afford (2^${exponentLevel} for ${formatMoney(cost)}) on our budget ` +
-            `of ${formatMoney(spendableMoney)} is less than the --min-ram-exponent (2^${minRamExponent} for ${formatMoney(costByRamExponent[minRamExponent])})`);
-    // Under some conditions, we consider the new server "not worthwhile". but only if it isn't the biggest possible server we can buy
-    if (exponentLevel < maxPurchasableServerRamExponent) {
-        // Abort if our home server is more than x times bettter (rough guage of how much we 'need' Daemon RAM at the current stage of the game?)
-        const homeThreshold = options['compare-to-home-threshold'];
-        // Unless we're looking at buying the maximum purchasable server size - in which case we can do no better
-        if (maxRamPossibleToBuy < ns.getServerMaxRam("home") * homeThreshold)
-            return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxRamPossibleToBuy)}) on our budget of ${formatMoney(spendableMoney)} ` +
-                `is less than --compare-to-home-threshold (${homeThreshold}) x home RAM (${formatRam(ns.getServerMaxRam("home"))})`);
-        // Abort if purchasing this server wouldn't improve our total RAM by more than x% (ensures we buy in meaningful increments)
-        const networkThreshold = options['compare-to-network-ram-threshold'];
-        if (maxRamPossibleToBuy / totalMaxRam < networkThreshold)
-            return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxRamPossibleToBuy)}) on our budget of ${formatMoney(spendableMoney)} ` +
-                `is less than --compare-to-network-ram-threshold (${networkThreshold}) x total network RAM (${formatRam(totalMaxRam)})`);
-    }
-
-    // Collect information about other previoulsy purchased servers
+    // Collect information about previously purchased servers first, so we know upgrade discounts and softcap trade-offs
     const maxPurchasableServerRam = Math.pow(2, maxPurchasableServerRamExponent);
     const ramByServer = Object.fromEntries(purchasedServers.map(server => [server, ns.getServerMaxRam(server)]));
     let [worstServerName, worstServerRam] = purchasedServers.reduce(([minS, minR], s) =>
@@ -205,39 +178,95 @@ async function tryToBuyBestServerPossible(ns) {
     let [bestServerName, bestServerRam] = purchasedServers.reduce(([maxS, maxR], s) =>
         ramByServer[s] > maxR ? [s, ramByServer[s]] : [maxS, maxR], [null, 0]);
 
-    // Abort if our worst previously-purchased server is better than the one we're looking to buy (ensures we buy in sane increments of capacity)
-    if (worstServerName != null && maxRamPossibleToBuy < worstServerRam && !options['allow-worse-purchases'])
-        return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxRamPossibleToBuy)}) on our budget of ` +
-            `${formatMoney(spendableMoney)} is less than our worst purchased server ${worstServerName}'s RAM ${formatRam(worstServerRam)}`);
-    // Only buy new servers as good as or better than our best bought server (anything less is deemed a regression in value)
-    if (bestServerRam != null && maxRamPossibleToBuy < bestServerRam && !options['allow-worse-purchases'])
-        return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxRamPossibleToBuy)}) on our budget of ` +
-            `${formatMoney(spendableMoney)} is less than our previously purchased server ${bestServerName} RAM ${formatRam(bestServerRam)}`);
+    const isUpgrade = purchasedServers.length >= maxPurchasedServers;
+    if (isUpgrade && worstServerRam >= maxPurchasableServerRam) {
+        keepRunning = false;
+        return setStatus(ns, `INFO: We are at the max number of servers ${maxPurchasedServers}, ` +
+            `and all have the maximum possible RAM (${formatRam(maxPurchasableServerRam)}).`);
+    }
 
-    let purchasedServer,
-        isUpgrade = false
-    // if we're at capacity, check to see if we can improve the current worst purchased server. If so, upgrade it.
-    if (purchasedServers.length >= maxPurchasedServers) {
-        if (worstServerRam == maxPurchasableServerRam) {
-            keepRunning = false;
-            return setStatus(ns, `INFO: We are at the max number of servers ${maxPurchasedServers}, ` +
-                `and all have the maximum possible RAM (${formatRam(maxPurchasableServerRam)}).`);
+    const worstExp = worstServerName != null ? Math.log2(worstServerRam) : 0;
+    const baseUpgradeCredit = isUpgrade ? costByRamExponent[worstExp] : 0;
+    const minCandidateExp = isUpgrade ? worstExp + 1 : minRamExponent;
+    // Detect whether CloudServerSoftcap > 1 (cost more than doubles above 64 GB)
+    const hasSoftcap = maxPurchasableServerRamExponent >= 7 && (costByRamExponent[7] / costByRamExponent[6]) > 2.0001;
+    const homeRam = ns.getServerMaxRam("home");
+    const homeThreshold = options['compare-to-home-threshold'];
+    const networkThreshold = options['compare-to-network-ram-threshold'];
+
+    // Determine the highest exponent we could afford at all (accounting for upgrade credit when at server limit)
+    let maxAffordableExp = 0;
+    for (let e = 1; e <= maxPurchasableServerRamExponent; e++)
+        if (costByRamExponent[e] - baseUpgradeCredit <= spendableMoney)
+            maxAffordableExp = e;
+
+    if (maxAffordableExp == 0)
+        return setStatus(ns, `${prefix}spendableMoney (${formatMoney(spendableMoney)}) is less than the cost ` +
+            `of even the cheapest ${isUpgrade ? 'upgrade' : 'server'} (${formatMoney(costByRamExponent[minCandidateExp] - baseUpgradeCredit)} for ${formatRam(2 ** minCandidateExp)})`);
+    if (maxAffordableExp < minCandidateExp)
+        return setStatus(ns, `${prefix}The highest ram exponent we can afford (2^${maxAffordableExp}) on our budget ` +
+            `of ${formatMoney(spendableMoney)} is less than the minimum needed (2^${minCandidateExp} for ${formatMoney(costByRamExponent[minCandidateExp] - baseUpgradeCredit)})`);
+
+    const maxAffordableRam = Math.pow(2, maxAffordableExp);
+    if (!isUpgrade && !options['allow-worse-purchases']) {
+        if (worstServerName != null && maxAffordableRam < worstServerRam)
+            return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxAffordableRam)}) on our budget of ` +
+                `${formatMoney(spendableMoney)} is less than our worst purchased server ${worstServerName}'s RAM ${formatRam(worstServerRam)}`);
+        if (bestServerName != null && maxAffordableRam < bestServerRam)
+            return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxAffordableRam)}) on our budget of ` +
+                `${formatMoney(spendableMoney)} is less than our previously purchased server ${bestServerName} RAM ${formatRam(bestServerRam)}`);
+    }
+
+    // Choose the best server exponent to purchase/upgrade:
+    // - In linear-cost BNs (softcap = 1), larger servers have identical $/GB and less RAM fragmentation, so pick the largest valid tier.
+    // - In softcap BNs (softcap > 1), smaller servers give dramatically more GB/$; pick the highest-GB/$ valid tier,
+    //   jumping straight to any tier `e` where the entire farm can already afford to reach `2^e` on current spendableMoney.
+    const startExp = (!isUpgrade && !options['allow-worse-purchases'] && bestServerRam > 0)
+        ? Math.max(minCandidateExp, Math.log2(bestServerRam)) : minCandidateExp;
+    let chosenExp = 0;
+    let bestEfficiency = 0;
+    let bestFarmCanReach = false;
+    for (let e = startExp; e <= maxAffordableExp; e++) {
+        const ram = Math.pow(2, e);
+        const stepCost = costByRamExponent[e] - baseUpgradeCredit;
+        const ramGain = isUpgrade ? ram - worstServerRam : ram;
+        if (e < maxPurchasableServerRamExponent) {
+            if (ram < homeRam * homeThreshold) continue;
+            if (ramGain / totalMaxRam < networkThreshold) continue;
         }
+        const efficiency = ramGain / stepCost;
+        const costToBringFarmToE = (maxPurchasedServers - purchasedServers.length) * costByRamExponent[e] +
+            purchasedServers.reduce((sum, s) => sum + (ramByServer[s] < ram ? costByRamExponent[e] - costByRamExponent[Math.log2(ramByServer[s])] : 0), 0);
+        const farmCanReachE = hasSoftcap && costToBringFarmToE <= spendableMoney;
+        if (chosenExp == 0 ||
+            (farmCanReachE && e > chosenExp) ||
+            (!bestFarmCanReach && (!hasSoftcap || efficiency > bestEfficiency * 1.0001 || (Math.abs(efficiency - bestEfficiency) <= bestEfficiency * 0.0001 && e > chosenExp)))) {
+            chosenExp = e;
+            bestEfficiency = efficiency;
+            bestFarmCanReach = farmCanReachE;
+        }
+    }
 
-        cost -= costByRamExponent[Math.log2(worstServerRam)]
-        isUpgrade = true
-        purchasedServer = (await getNsDataThroughFile(ns, `ns.cloud.upgradeServer(ns.args[0], ns.args[1])`, null,
-            [worstServerName, maxRamPossibleToBuy])) ? worstServerName : "";
-    } else {
-        purchasedServer = await getNsDataThroughFile(ns, `ns.cloud.purchaseServer(ns.args[0], ns.args[1])`, null,
-            [purchasedServerName, maxRamPossibleToBuy]);
+    if (chosenExp == 0) {
+        if (maxAffordableRam < homeRam * homeThreshold)
+            return setStatus(ns, `${prefix}the most RAM we can buy (${formatRam(maxAffordableRam)}) on our budget of ${formatMoney(spendableMoney)} ` +
+                `is less than --compare-to-home-threshold (${homeThreshold}) x home RAM (${formatRam(homeRam)})`);
+        return setStatus(ns, `${prefix}the most RAM we can gain (${formatRam(isUpgrade ? maxAffordableRam - worstServerRam : maxAffordableRam)}) on our budget of ${formatMoney(spendableMoney)} ` +
+            `is less than --compare-to-network-ram-threshold (${networkThreshold}) x total network RAM (${formatRam(totalMaxRam)})`);
     }
+
+    const maxRamPossibleToBuy = Math.pow(2, chosenExp);
+    const cost = costByRamExponent[chosenExp] - baseUpgradeCredit;
+    const purchasedServer = isUpgrade
+        ? ((await getNsDataThroughFile(ns, `ns.cloud.upgradeServer(ns.args[0], ns.args[1])`, null, [worstServerName, maxRamPossibleToBuy])) ? worstServerName : "")
+        : await getNsDataThroughFile(ns, `ns.cloud.purchaseServer(ns.args[0], ns.args[1])`, null, [purchasedServerName, maxRamPossibleToBuy]);
+
     if (!purchasedServer)
-        setStatus(ns, `${prefix}Could not ${isUpgrade ? 'upgrade' : 'purchase'} a server with ${formatRam(maxRamPossibleToBuy)} ` +
+        return setStatus(ns, `${prefix}Could not ${isUpgrade ? 'upgrade' : 'purchase'} a server with ${formatRam(maxRamPossibleToBuy)} ` +
             `RAM for ${formatMoney(cost)} with a budget of ${formatMoney(spendableMoney)}.`);
-    else {
-        log(ns, `SUCCESS: ${isUpgrade ? 'Upgraded' : 'Purchased'} server ${purchasedServer} with ${formatRam(maxRamPossibleToBuy)} ` +
-            `RAM for ${formatMoney(cost)} (budget was ${formatMoney(spendableMoney)})`, true, 'success');
-        budget -= cost;
-    }
+
+    log(ns, `SUCCESS: ${isUpgrade ? 'Upgraded' : 'Purchased'} server ${purchasedServer} with ${formatRam(maxRamPossibleToBuy)} ` +
+        `RAM for ${formatMoney(cost)} (budget was ${formatMoney(spendableMoney)})`, true, 'success');
+    budget -= cost;
+    return true;
 }
