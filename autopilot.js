@@ -13,9 +13,9 @@ const argsSchema = [ // The set of all command line arguments
     ['install-at-aug-count', 10], // Automatically install when we can afford this many new augmentations (with NF only counting as 1). Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-at-aug-plus-nf-count', 15], // or... automatically install when we can afford this many augmentations including additional levels of Neuroflux.  Note: This number will automatically be increased by 1 for every level of SF11 you have (up to 3)
     ['install-for-augs', ["The Red Pill"]], // or... automatically install as soon as we can afford one of these augmentations
-    ['install-countdown', 1 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (forecast padding, or the whole wait when the forecast is unsure)
+    ['install-countdown', 3 * 60 * 1000], // If we're ready to install, wait this long first to see if more augs come online (forecast padding, or the whole wait when the forecast is unsure)
     ['forecast-confidence-threshold', 0.7], // Below this, an install-timing forecast is not trusted and --install-countdown is used instead
-    ['forecast-horizon', 5 * 60 * 1000], // If the aug that reaches the install threshold is further out than this, install now instead of waiting
+    ['forecast-horizon', 10 * 60 * 1000], // If the aug that reaches the install threshold is further out than this, install now instead of waiting
     ['forecast-min-samples', 12], // Income samples needed before trusting the measured income rate (~1 minute at 5s intervals)
     ['forecast-window', 10 * 60 * 1000], // How far back income samples are kept when measuring the income rate
     ['disable-forecast', false], // Force the old behaviour: decide when to install purely from --install-countdown
@@ -33,7 +33,7 @@ const argsSchema = [ // The set of all command line arguments
     ['spend-hashes-on-server-hacking-threshold', 0.15], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
-    ['xp-mode-interval-minutes', 30], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
+    ['xp-mode-interval-minutes', 10], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
     ['xp-mode-duration-minutes', 1], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
     ['no-tail-windows', true], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
 ];

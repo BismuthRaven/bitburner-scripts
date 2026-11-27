@@ -36,7 +36,7 @@ const argsSchema = [
     ['initial-study-time', 15], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 15], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
 
-    ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
+    ['reserved-ram', 24], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
     ['double-reserve-threshold', 256], // in GB of RAM. Double our home RAM reserve once there is this much home max RAM.
 
     ['share', undefined], // Enable sharing free ram to increase faction rep gain (by default, is enabled automatically once RAM is sufficient)
@@ -63,7 +63,7 @@ const argsSchema = [
     ['i', false], // Farm intelligence with manual hack.
 
     // Debugging flags
-    ['silent-misfires', true], // Instruct remote scripts not to alert when they misfire
+    ['silent-misfires', false], // Instruct remote scripts not to alert when they misfire
     ['no-tail-windows', true], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
     ['h', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
     ['hack-only', false], // Same as above
