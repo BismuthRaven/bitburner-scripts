@@ -2,10 +2,10 @@
 // here, so it can be exercised offline with `node .tools/aug-forecast-test.mjs`.
 // See .vault/aug-install-forecast.md for the design.
 
-/** Money source categories that represent income. Deliberately excludes *_expenses, hospitalization and augmentations:
+/** Money source categories that represent income. Deliberately excludes *_expenses, servers, hospitalization and augmentations:
  * spending on servers/augs must not look like negative income. */
 export const EARNING_CATEGORIES = ['hacking', 'hacknet', 'gang', 'crime', 'work', 'stock', 'sleeves', 'bladeburner',
-    'codingcontract', 'infiltration', 'corporation', 'class', 'casino', 'servers', 'other'];
+    'codingcontract', 'infiltration', 'corporation', 'class', 'casino', 'darknet', 'other'];
 /** How hard sample noise counts against the trend's confidence (noise equal to the typical step => quality 0) */
 const NOISE_PENALTY = 2;
 

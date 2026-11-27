@@ -47,7 +47,7 @@ const argsSchema = [
     ['disable-script', []], // The names of scripts that you do not want run by our scheduler
     ['run-script', []], // The names of additional scripts that you want daemon to run on home
 
-    ['max-purchased-server-spend', 0.30], // Percentage of total hack income earnings we're willing to re-invest in new hosts (extra RAM in the current aug only)
+    ['max-purchased-server-spend', 0.50], // Percentage of total hack income earnings we're willing to re-invest in new hosts (extra RAM in the current aug only)
 
     // Batch script fine-tuning flags
     ['initial-max-targets', undefined], // Initial number of servers to target / prep (default is 2 + 1 for every 500 TB of RAM on the network)
@@ -409,13 +409,14 @@ export async function main(ns) {
                 shouldRun: () => 4 in dictSourceFiles && (_cachedPlayerInfo.factions.length > 0 || getPlayerMoney(ns) > 1e9) &&
                     reqRam(128 / (2 ** dictSourceFiles[4])) // Uses singularity functions, and higher SF4 levels result in lower RAM requirements
             },
-            {   // Periodically look to purchase new servers, but note that these are often not a great use of our money (hack income isn't everything) so we may hold-back.
+            {   // Periodically look to purchase new servers ("daemon-*"), which provide cheap RAM for hacking & XP grinding.
                 interval: 32000, name: "host-manager.js", module: "servers", minRamReq: 6.55,
-                // Restrict spending on new servers (i.e. temporary RAM for the current augmentation only) to be a % of total earned hack income.
+                // Restrict spending on new servers (i.e. temporary RAM for the current augmentation only) to be a % of earned income.
                 shouldRun: () => shouldImproveHacking() && getHostManagerBudget() > 0,
                 args: () => ['--budget', getHostManagerBudget(), '--absolute-reserve', reservedMoney(ns),
-                    // Mechanic to reserve more of our money the longer we've been in the BN. Starts at 0%, after 24h we should be reserving 92%.
-                    '--reserve-by-time', true, '--reserve-by-time-decay-factor', 0.1, '--reserve-percent', 0,
+                    '--allow-worse-purchases', '--compare-to-home-threshold', 0, '--compare-to-network-ram-threshold', 0.005,
+                    // Mechanic to reserve more of our money the longer we've been in the aug. Starts at 0%, gradually increasing over long runs.
+                    '--reserve-by-time', true, '--reserve-by-time-decay-factor', 0.05, '--reserve-percent', 0,
                     '--utilization-trigger', '0'], // Disable utilization-based restrictions on purchasing RAM
             },
             // Check if any new servers can be backdoored. If there are many, this can eat up a lot of RAM, so make this the last script scheduled at startup.
@@ -465,24 +466,40 @@ export async function main(ns) {
         await doTargetingLoop(ns);
     }
 
-    /** Periodic scripts helper function: In bitnodes with hack income disabled, don't waste money on improving hacking infrastructure */
+    /** Periodic scripts helper function: In bitnodes with hack income disabled, still allow server purchases once we have modest cash (for hack XP / share RAM) */
     function shouldImproveHacking() {
         return 0 != (bitNodeMults.ScriptHackMoneyGain * bitNodeMults.ScriptHackMoney) || // Check for disabled hack-income
-            getPlayerMoney(ns) > 1e12 || // If we have sufficient money, we may consider improving hack infrastructure (to earn hack exp more quickly)
+            getPlayerMoney(ns) > 1e8 || // Purchased servers are still valuable for earning hack XP and sharing RAM
             bitNodeN === 8 // The exception is in BN8, we still want lots of hacking to take place to manipulate stocks, which requires this infrastructure (TODO: Strike a balance between spending on this stuff and leaving money for stockmaster.js)
+    }
+
+    /** Periodic scripts helper function: Cost of a cloud server of a given RAM size (matches Bitburner's getCloudServerCost) */
+    function getCloudServerCostEstimate(ram) {
+        if (!ram || ram <= 0) return 0;
+        const upg = Math.max(0, Math.log2(ram) - 6);
+        return ram * 55000 * (bitNodeMults.CloudServerCost ?? 1) * Math.pow(bitNodeMults.CloudServerSoftcap ?? 1, upg);
     }
 
     /** Periodic scripts helper function: Get how much we're willing to spend on new servers (host-manager.js budget) */
     function getHostManagerBudget() {
-        const serverSpend = -(moneySources?.sinceInstall?.servers ?? 0); // This is given as a negative number (profit), we invert it to get it as a positive expense amount
+        // Compute spend on cloud ("daemon-*") servers directly rather than using moneySources.sinceInstall.servers,
+        // because Bitburner also records permanent home RAM/core upgrades under `servers`, which would starve cloud server budget!
+        const cloudServerSpend = allHostNames.reduce((sum, host) =>
+            host.startsWith(purchasedServersName) ? sum + getCloudServerCostEstimate(dictServerMaxRam[host] ?? 0) : sum, 0);
+        const sources = moneySources?.sinceInstall;
+        // Sum positive income categories (excluding expenses like servers/augmentations/hacknet_expenses/gang_expenses)
+        const grossIncome = !sources ? 0 :
+            (sources.hacking || 0) + (sources.hacknet || 0) + (sources.gang || 0) + (sources.crime || 0) +
+            (sources.work || 0) + (sources.stock || 0) + (sources.sleeves || 0) + (sources.bladeburner || 0) +
+            (sources.codingcontract || 0) + (sources.infiltration || 0) + (sources.corporation || 0) +
+            (sources.class || 0) + (sources.casino || 0) + (sources.darknet || 0) + (sources.other || 0);
         const budget = Math.max(0,
-            // Ensure the total amount of money spent on new servers is less than the configured max spend amount
-            options['max-purchased-server-spend'] * (moneySources?.sinceInstall?.hacking ?? 0) - serverSpend,
-            // Special-case support: In some BNs hack income is severely penalized (or zero) but earning hack exp is still useful.
-            // To support these, always allow a small percentage (0.1%) of our total earnings (including other income sources) to be spent on servers
-            (moneySources?.sinceInstall?.total ?? 0) * 0.001 - serverSpend);
-        //log(ns, `Math.max(0, ${options['max-purchased-server-spend']} * (${formatMoney(moneySources?.sinceInstall?.hacking)} ?? 0) - ${formatMoney(serverSpend)}, ` +
-        //    `(${formatMoney(moneySources?.sinceInstall?.total)} ?? 0) * 0.001 - ${formatMoney(serverSpend)}) = ${formatMoney(budget)}`);
+            // Re-invest up to configured % of hack income into cloud servers
+            options['max-purchased-server-spend'] * (sources?.hacking ?? 0) - cloudServerSpend,
+            // Also allow up to 15% of gross non-hack earnings (gang, casino, contracts, crime, etc.) to fund cheap RAM for hack XP & bootstrapping
+            0.15 * grossIncome - cloudServerSpend,
+            // Fallback before the first 60s moneySources refresh or after manual/seed cash: allow 15% of unreserved cash
+            0.15 * Math.max(0, getPlayerMoney(ns) - reservedMoney(ns)) - cloudServerSpend);
         return budget;
     }
 
