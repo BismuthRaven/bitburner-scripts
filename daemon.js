@@ -414,10 +414,10 @@ export async function main(ns) {
                 // Restrict spending on new servers (i.e. temporary RAM for the current augmentation only) to be a % of earned income.
                 shouldRun: () => shouldImproveHacking() && getHostManagerBudget() > 0,
                 args: () => ['--budget', getHostManagerBudget(), '--absolute-reserve', reservedMoney(ns),
-                    '--allow-worse-purchases', '--compare-to-home-threshold', 0, '--compare-to-network-ram-threshold', 0.005,
+                    '--allow-worse-purchases', '--compare-to-home-threshold', 0, '--compare-to-network-ram-threshold', 0,
                     // Mechanic to reserve more of our money the longer we've been in the aug. Starts at 0%, gradually increasing over long runs.
-                    '--reserve-by-time', true, '--reserve-by-time-decay-factor', 0.05, '--reserve-percent', 0,
-                    '--utilization-trigger', '0'], // Disable utilization-based restrictions on purchasing RAM
+                    '--reserve-by-time', '--reserve-by-time-decay-factor', 0.05, '--reserve-percent', 0,
+                    '--utilization-trigger', 0], // Disable utilization-based restrictions on purchasing RAM
             },
             // Check if any new servers can be backdoored. If there are many, this can eat up a lot of RAM, so make this the last script scheduled at startup.
             { interval: 33000, name: "/Tasks/backdoor-all-servers.js", module: "backdoor", shouldRun: () => 4 in dictSourceFiles && playerHackSkill() > 10 }, // Don't do this until we reach hack level 10. If we backdoor too early, it's very slow and eats up RAM for a long time,
@@ -493,13 +493,14 @@ export async function main(ns) {
             (sources.work || 0) + (sources.stock || 0) + (sources.sleeves || 0) + (sources.bladeburner || 0) +
             (sources.codingcontract || 0) + (sources.infiltration || 0) + (sources.corporation || 0) +
             (sources.class || 0) + (sources.casino || 0) + (sources.darknet || 0) + (sources.other || 0);
+        const unreservedCash = Math.max(0, getPlayerMoney(ns) - reservedMoney(ns));
         const budget = Math.max(0,
             // Re-invest up to configured % of hack income into cloud servers
             options['max-purchased-server-spend'] * (sources?.hacking ?? 0) - cloudServerSpend,
-            // Also allow up to 15% of gross non-hack earnings (gang, casino, contracts, crime, etc.) to fund cheap RAM for hack XP & bootstrapping
-            0.15 * grossIncome - cloudServerSpend,
-            // Fallback before the first 60s moneySources refresh or after manual/seed cash: allow 15% of unreserved cash
-            0.15 * Math.max(0, getPlayerMoney(ns) - reservedMoney(ns)) - cloudServerSpend);
+            // Also allow up to 25% of gross non-expense earnings (gang, casino, contracts, crime, etc.) to fund cheap RAM for hack XP & bootstrapping
+            0.25 * grossIncome - cloudServerSpend,
+            // Allow up to 25% of current unreserved cash so post-reset cash / unrealized stock sales / seed money can buy cheap daemon-* servers immediately
+            0.25 * unreservedCash - cloudServerSpend);
         return budget;
     }
 
